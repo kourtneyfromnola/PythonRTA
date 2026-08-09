@@ -1,0 +1,69 @@
+def extract_type_curve_table(ws):
+    # Find the actual paste-ready table by locating "Type Curve #"
+    header_row = None
+    start_col = None
+
+    for row in ws.iter_rows():
+        for cell in row:
+            text = str(cell.value).strip().lower() if cell.value is not None else ""
+
+            if text in ("type curve #", "type curve#", "type curve number"):
+                header_row = cell.row
+                start_col = cell.column
+                break
+
+        if header_row is not None:
+            break
+
+    if header_row is None:
+        raise ValueError(
+            "Could not find the 'Type Curve #' header on the Type Curves sheet."
+        )
+
+    # Read all populated headers to the right
+    headers = []
+
+    for c in range(start_col, ws.max_column + 1):
+        value = ws.cell(header_row, c).value
+
+        if value is None or value == "":
+            # Stop after reaching the end of the populated header row
+            if headers:
+                break
+            continue
+
+        headers.append(value)
+
+    if not headers:
+        raise ValueError("Type Curve table headers could not be read.")
+
+    end_col = start_col + len(headers) - 1
+
+    # Read all populated type-curve rows underneath the headers
+    data = []
+
+    for r in range(header_row + 1, ws.max_row + 1):
+
+        vals = [
+            ws.cell(r, c).value
+            for c in range(start_col, end_col + 1)
+        ]
+
+        # Skip completely blank rows
+        if all(v in (None, "") for v in vals):
+            continue
+
+        data.append(vals)
+
+    if not data:
+        raise ValueError(
+            "Type Curve headers were found, but no type-curve rows were found."
+        )
+
+    print(
+        f"Type Curve table found: "
+        f"{len(data):,} rows x {len(headers):,} columns",
+        flush=True,
+    )
+
+    return headers, data
