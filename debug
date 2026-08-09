@@ -1,0 +1,12 @@
+if value is None or len(value) == 0:
+    print("\n--- TYPE CURVE DEBUG ---", flush=True)
+    print(f"Sheet used: {ws.Name}", flush=True)
+    print(f"Used rows: {ws.UsedRange.Rows.Count}", flush=True)
+    print(f"Used cols: {ws.UsedRange.Columns.Count}", flush=True)
+    print(f"Used address: {ws.UsedRange.Address}", flush=True)
+    print("------------------------\n", flush=True)
+
+    raise ValueError(
+        "Type Curves sheet was found, but Python extracted "
+        "zero rows for the paste-ready TC table."
+    )
