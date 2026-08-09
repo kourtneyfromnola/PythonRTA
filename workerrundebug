@@ -1,0 +1,13 @@
+print(f"Worker {worker_id}: starting Type Curves", flush=True)
+populate_type_curves(workbook, tc_headers, tc_data)
+
+print(f"Worker {worker_id}: starting WellAttributes", flush=True)
+populate_wellattributes(workbook, cases)
+
+print(f"Worker {worker_id}: starting full rebuild", flush=True)
+excel.CalculateFullRebuild()
+
+print(f"Worker {worker_id}: waiting for calculation", flush=True)
+wait_for_calculation(excel, pythoncom, 900)
+
+print(f"Worker {worker_id}: setup complete, starting cases", flush=True)
