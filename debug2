@@ -1,0 +1,11 @@
+if not data:
+    print("\n--- TYPE CURVE DEBUG ---", flush=True)
+    print(f"Sheet used: {ws.title}", flush=True)
+    print(f"Used rows: {ws.max_row}", flush=True)
+    print(f"Used cols: {ws.max_column}", flush=True)
+    print(f"Header row: {header_row}", flush=True)
+    print(f"Start column: {start_col}", flush=True)
+    print(f"Headers found: {headers}", flush=True)
+    print("------------------------\n", flush=True)
+
+    raise ValueError("Type Curve extraction returned zero data rows.")
