@@ -1,0 +1,58 @@
+def populate_type_curves(workbook, source_headers, source_data):
+    ws = find_com_sheet(workbook, "Type Curves")
+
+    # Find "Type Curve #" in the existing SWELL sheet
+    header_row = None
+    start_col = None
+
+    used_rows = ws.UsedRange.Rows.Count
+    used_cols = ws.UsedRange.Columns.Count
+
+    for r in range(1, min(20, used_rows) + 1):
+        for c in range(1, used_cols + 1):
+            value = ws.Cells(r, c).Value
+
+            if value is not None:
+                text = str(value).strip().lower()
+
+                if text in ("type curve #", "type curve#", "type curve number"):
+                    header_row = r
+                    start_col = c
+                    break
+
+        if header_row is not None:
+            break
+
+    if header_row is None:
+        raise RuntimeError(
+            "Could not find 'Type Curve #' on the SWELL Type Curves sheet."
+        )
+
+    rows = len(source_data)
+    cols = len(source_headers)
+
+    print(
+        f"Pasting {rows:,} Type Curve rows into SWELL...",
+        flush=True,
+    )
+
+    # Clear old type-curve values below the headers
+    clear_to_row = max(header_row + rows + 10, used_rows)
+
+    ws.Range(
+        ws.Cells(header_row + 1, start_col),
+        ws.Cells(clear_to_row, start_col + cols - 1),
+    ).ClearContents()
+
+    # Paste all values in ONE operation for speed
+    destination = ws.Range(
+        ws.Cells(header_row + 1, start_col),
+        ws.Cells(header_row + rows, start_col + cols - 1),
+    )
+
+    destination.Value = tuple(
+        tuple(row[:cols])
+        for row in source_data
+    )
+
+    print("Type Curves pasted successfully.", flush=True)
