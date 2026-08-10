@@ -1,0 +1,32 @@
+used_rows = ws.UsedRange.Rows.Count
+used_cols = ws.UsedRange.Columns.Count
+
+header_row = None
+start_col = None
+
+# Find the SWELL Type Curves table using API + Month
+for r in range(1, min(20, used_rows) + 1):
+    for c in range(1, used_cols):
+        value1 = ws.Cells(r, c).Value
+        value2 = ws.Cells(r, c + 1).Value
+
+        text1 = str(value1).strip().lower() if value1 is not None else ""
+        text2 = str(value2).strip().lower() if value2 is not None else ""
+
+        if text1 == "api" and text2 == "month":
+            header_row = r
+            start_col = c
+            break
+
+    if header_row is not None:
+        break
+
+if header_row is None:
+    raise RuntimeError(
+        "Could not find adjacent API / Month headers on the SWELL Type Curves sheet."
+    )
+
+print(
+    f"SWELL Type Curves destination found at row {header_row}, column {start_col}",
+    flush=True,
+)
