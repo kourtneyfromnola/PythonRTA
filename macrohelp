@@ -1,0 +1,22 @@
+def run_macro(workbook, excel):
+    macro_names = [
+        f"'{workbook.Name}'!CoS.CoS_Calc",
+        f"'{workbook.Name}'!CoS_Calc",
+        "CoS.CoS_Calc",
+        "CoS_Calc",
+    ]
+
+    errors = []
+
+    for macro_name in macro_names:
+        try:
+            print(f"Trying macro: {macro_name}", flush=True)
+            excel.Application.Run(macro_name)
+            print(f"Macro succeeded: {macro_name}", flush=True)
+            return
+        except Exception as exc:
+            errors.append(f"{macro_name}: {exc}")
+
+    raise RuntimeError(
+        "Could not run CoS macro. Attempts:\n" + "\n".join(errors)
+    )
