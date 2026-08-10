@@ -1,0 +1,85 @@
+def find_typecurve_table(ws):
+    for i in range(1, ws.ListObjects.Count + 1):
+        lo = ws.ListObjects(i)
+        if "typecurve" in norm_header(lo.Name).replace(" ", ""):
+            return lo
+    if ws.ListObjects.Count:
+        return ws.ListObjects(1)
+    return None
+
+def find_header_row_generic(ws, wanted_headers, max_rows=30, max_cols=500):
+    """Locate the row on a COM worksheet whose cell text best matches the
+    input workbook's Type Curves headers, for sheets that store data as a
+    plain range instead of an Excel Table."""
+    wanted_norms = {norm_header(h) for h in wanted_headers if h not in (None, "")}
+    used_rows = min(max_rows, ws.UsedRange.Rows.Count)
+    used_cols = min(max_cols, ws.UsedRange.Columns.Count)
+    best_row, best_count, best_map = None, 0, {}
+    for r in range(1, used_rows + 1):
+        row_map = {}
+        for c in range(1, used_cols + 1):
+            h = norm_header(ws.Cells(r, c).Value)
+            if h and h in wanted_norms and h not in row_map:
+                row_map[h] = c
+        if len(row_map) > best_count:
+            best_count, best_row, best_map = len(row_map), r, row_map
+    if best_row is None or best_count < 3:
+        return None, {}
+    return best_row, best_map
+
+def populate_type_curves_plain_range(ws, source_headers, source_data):
+    """Fallback for SWELL 'Type Curves' sheets with no Excel Table: find the
+    header row by matching text, clear a generous stale-data region beneath
+    it, and bulk-write the new data in one Range.Value assignment."""
+    header_row, colmap = find_header_row_generic(ws, source_headers)
+    if header_row is None:
+        raise RuntimeError(
+            "Could not find a header row on the SWELL 'Type Curves' sheet that matches "
+            "the input workbook's Type Curves headers, and no Excel Table exists either. "
+            "Run --diagnose and check the [Type Curves] table listing / sheet layout."
+        )
+    start_col, end_col = min(colmap.values()), max(colmap.values())
+    ncols = end_col - start_col + 1
+
+    clear_rows = max(len(source_data) + 200, 2000)
+    ws.Range(ws.Cells(header_row + 1, start_col), ws.Cells(header_row + clear_rows, end_col)).ClearContents()
+
+    if source_data:
+        out = [[None] * ncols for _ in range(len(source_data))]
+        for src_idx, header in enumerate(source_headers):
+            h = norm_header(header)
+            if h not in colmap:
+                continue
+            offset = colmap[h] - start_col
+            for i, row in enumerate(source_data):
+                out[i][offset] = row[src_idx] if src_idx < len(row) else None
+        ws.Range(
+            ws.Cells(header_row + 1, start_col), ws.Cells(header_row + len(source_data), end_col)
+        ).Value = out
+    return len(colmap)
+
+def populate_type_curves(workbook, source_headers, source_data):
+    ws = find_com_sheet(workbook, "Type Curves")
+    lo = find_typecurve_table(ws)
+    if lo is not None:
+        resize_listobject_rows(lo, len(source_data))
+        target_headers = com_table_headers(lo)
+        matched = 0
+        for src_idx, header in enumerate(source_headers):
+            h = norm_header(header)
+            if not h or h not in target_headers:
+                continue
+            idx, _ = target_headers[h]
+            bulk_write_listcolumn(lo, idx, [row[src_idx] if src_idx < len(row) else None for row in source_data])
+            matched += 1
+        if matched < 3:
+            raise RuntimeError("Input Type Curves table headers do not match SWELL Type Curves headers.")
+        return
+
+    # No Excel Table on this sheet — write to a plain range instead.
+    matched = populate_type_curves_plain_range(ws, source_headers, source_data)
+    if matched < 3:
+        raise RuntimeError(
+            "Matched fewer than 3 columns writing to SWELL 'Type Curves' sheet as a plain range. "
+            "Run --diagnose to inspect the sheet's actual header text."
+        )
