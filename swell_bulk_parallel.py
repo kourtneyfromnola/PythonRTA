@@ -69,6 +69,28 @@ LATERAL_FEET_MAP = {100: 5000, 150: 7500, 200: 10000, 250: 12500, 300: 13000}
 XL_CALCULATION_MANUAL = -4135
 XL_DONE = 0
 
+# ---------------------------------------------------------------------------
+# SWELL WORKBOOK CONFIG
+# These are the only things you should ever need to touch if your SWELL
+# model uses different Named Range / macro / sheet names than assumed below.
+# Run:  python swell_bulk_parallel.py --diagnose --swell "path\to\SWELL.xlsm"
+# to print the actual Named Ranges, macros, and ListObjects found in your
+# SWELL workbook so you can correct any mismatches here BEFORE a full run.
+# ---------------------------------------------------------------------------
+SWELL_CONFIG = {
+    "case_name": "case",
+    "npv_name": "npv",
+    "aarr_name": "aarr",
+    "cos_input_name": "flatOilInput",
+    "price_scenario_name": "priceScenario",
+    "econ_limit_name": "econLimit",
+    "price_scenario_value": "LRP P50",
+    "econ_limit_value": "YES",
+    "cos_input_value": 40,
+    "macro_candidates": ["CoS_Calc", "CoS.CoS_Calc"],
+    "dashboard_sheet": "SW Dashboard",
+}
+
 HEADER_ALIASES = {
     "operators": ["operators", "operator"],
     "lateral_lengths": ["lateral lengths", "lateral length", "ll"],
@@ -427,45 +449,70 @@ def extract_type_curve_table(ws):
     title_row = title_col = None
     for row in ws.iter_rows():
         for cell in row:
-            if norm_header(cell.value) == "type curves":
+            if norm_header(cell.value) in ("type curves", "type curve"):
                 title_row, title_col = cell.row, cell.column
                 break
         if title_row:
             break
+
+    # Fallback: no explicit "Type Curves" title cell — assume row 1 is the
+    # header row directly (some sheets are laid out as a plain table with
+    # no separate title banner above it).
     if not title_row:
-        raise ValueError("Could not find the 'Type Curves' title cell.")
+        title_row, title_col = 0, 1
+
     header_row = title_row + 1
     start_col = title_col
-    headers = []
-    c = start_col
-    blank_run = 0
-    while c <= ws.max_column:
-        v = ws.cell(header_row, c).value
-        if v in (None, ""):
-            blank_run += 1
-            if blank_run >= 3:
+
+    # A row is a plausible header row if it has several non-blank cells.
+    # If the row right below the title is mostly blank (e.g. a spacer row,
+    # merged banner, or units row), look a little further down instead of
+    # assuming the layout and silently returning an empty table.
+    def nonblank_count(r):
+        return sum(1 for c in range(start_col, ws.max_column + 1) if ws.cell(r, c).value not in (None, ""))
+
+    if nonblank_count(header_row) < 3:
+        for candidate in range(header_row, min(header_row + 5, ws.max_row) + 1):
+            if nonblank_count(candidate) >= 3:
+                header_row = candidate
                 break
-            headers.append(v)
-        else:
-            blank_run = 0
-            headers.append(v)
-        c += 1
-    while headers and headers[-1] in (None, ""):
-        headers.pop()
-    end_col = start_col + len(headers) - 1
+
+    # Take every column from start_col through the last column that has a
+    # header value OR any data beneath it, up to ws.max_column. No premature
+    # cutoff on a short blank run — that heuristic is what caused this
+    # table to come back empty when headers have any spacing/gaps.
+    end_col = start_col
+    for c in range(start_col, ws.max_column + 1):
+        header_val = ws.cell(header_row, c).value
+        has_data_below = any(
+            ws.cell(r, c).value not in (None, "")
+            for r in range(header_row + 1, min(header_row + 20, ws.max_row) + 1)
+        )
+        if header_val not in (None, "") or has_data_below:
+            end_col = c
+    headers = [ws.cell(header_row, c).value for c in range(start_col, end_col + 1)]
+
     data = []
-    blank_rows = 0
     for r in range(header_row + 1, ws.max_row + 1):
         vals = [ws.cell(r, c).value for c in range(start_col, end_col + 1)]
         if all(v in (None, "") for v in vals):
-            blank_rows += 1
-            if blank_rows >= 3:
-                break
             continue
-        blank_rows = 0
         data.append(vals)
+
     if not data:
-        raise ValueError("Paste-ready Type Curves table is empty.")
+        sample_rows = []
+        for r in range(max(1, title_row - 1), min(title_row + 10, ws.max_row) + 1):
+            sample_rows.append(
+                f"  row {r}: " + repr([ws.cell(r, c).value for c in range(start_col, min(start_col + 8, ws.max_column) + 1)])
+            )
+        raise ValueError(
+            "Paste-ready Type Curves table is empty.\n"
+            f"Sheet: '{ws.title}' | title cell found at row {title_row}, col {title_col} "
+            f"(0 means no 'Type Curves' title cell was found and row 1 was assumed).\n"
+            f"Header row used: {header_row} | Headers read: {headers}\n"
+            f"Columns scanned: {start_col} to {end_col}\n"
+            "Nearby raw cell contents (for diagnosis):\n" + "\n".join(sample_rows)
+        )
     return headers, data
 
 def resolve_assumption(records, operator):
@@ -591,7 +638,16 @@ def get_name_range(workbook, excel, name):
     try:
         return workbook.Names(name).RefersToRange
     except Exception:
+        pass
+    try:
         return excel.Range(name)
+    except Exception as exc:
+        available = ", ".join(sorted(n.Name for n in workbook.Names)) or "(none)"
+        raise KeyError(
+            f"SWELL workbook has no Named Range '{name}'. "
+            f"Available Named Ranges: {available}. "
+            f"Fix this in SWELL_CONFIG at the top of the script, or run --diagnose."
+        ) from exc
 
 def find_com_sheet(workbook, wanted):
     target = norm_header(wanted)
@@ -737,16 +793,20 @@ def populate_type_curves(workbook, source_headers, source_data):
 def run_macro(workbook, excel):
     workbook.Activate()
     try:
-        find_com_sheet(workbook, "SW Dashboard").Activate()
+        find_com_sheet(workbook, SWELL_CONFIG["dashboard_sheet"]).Activate()
     except Exception:
         pass
     last = None
-    for macro in ["CoS_Calc", "CoS.CoS_Calc"]:
+    for macro in SWELL_CONFIG["macro_candidates"]:
         try:
             return excel.Run(f"'{workbook.Name}'!{macro}")
         except Exception as exc:
             last = exc
-    raise RuntimeError(f"Could not run CoS_Calc: {last}")
+    raise RuntimeError(
+        f"Could not run any of {SWELL_CONFIG['macro_candidates']} in the SWELL workbook: {last}. "
+        f"Run --diagnose to list the macros Excel can actually see, then update "
+        f"SWELL_CONFIG['macro_candidates']."
+    )
 
 def worker_run(worker_id, swell_path, input_path, case_dicts, worker_root, visible=False):
     pythoncom, win32com_client = import_excel_modules()
@@ -779,28 +839,43 @@ def worker_run(worker_id, swell_path, input_path, case_dicts, worker_root, visib
             IgnoreReadOnlyRecommended=True, Notify=False, AddToMru=False
         )
 
+        t_setup = time.monotonic()
         populate_type_curves(workbook, tc_headers, tc_data)
         populate_wellattributes(workbook, cases)
         workbook.Activate()
+        # CalculateFullRebuild is only needed ONCE, right after structurally
+        # changing the workbook (resizing tables / repopulating data), so
+        # Excel rebuilds its dependency tree correctly. Doing this per-case
+        # instead of Calculate() is what causes multi-hour runtimes.
         excel.CalculateFullRebuild()
         wait_for_calculation(excel, pythoncom, 900)
+        print(f"[worker {worker_id}] setup + initial full rebuild: {time.monotonic() - t_setup:.1f}s", flush=True)
 
-        case_rng = get_name_range(workbook, excel, "case")
-        npv_rng = get_name_range(workbook, excel, "npv")
-        aarr_rng = get_name_range(workbook, excel, "aarr")
-        cos_rng = get_name_range(workbook, excel, "flatOilInput")
-        price_rng = get_name_range(workbook, excel, "priceScenario")
-        econ_rng = get_name_range(workbook, excel, "econLimit")
+        case_rng = get_name_range(workbook, excel, SWELL_CONFIG["case_name"])
+        npv_rng = get_name_range(workbook, excel, SWELL_CONFIG["npv_name"])
+        aarr_rng = get_name_range(workbook, excel, SWELL_CONFIG["aarr_name"])
+        cos_rng = get_name_range(workbook, excel, SWELL_CONFIG["cos_input_name"])
+        price_rng = get_name_range(workbook, excel, SWELL_CONFIG["price_scenario_name"])
+        econ_rng = get_name_range(workbook, excel, SWELL_CONFIG["econ_limit_name"])
 
+        # These three inputs are constant across every case in the run, so
+        # they only need to be written once, not on every iteration.
+        workbook.Activate()
+        price_rng.Value = SWELL_CONFIG["price_scenario_value"]
+        econ_rng.Value = SWELL_CONFIG["econ_limit_value"]
+        cos_rng.Value = SWELL_CONFIG["cos_input_value"]
+
+        case_times = []
         for c in cases:
             t0 = time.monotonic()
             try:
                 workbook.Activate()
                 case_rng.Value = c.case_number
-                price_rng.Value = "LRP P50"
-                econ_rng.Value = "YES"
-                cos_rng.Value = 40
-                excel.CalculateFull()
+                # Calculate() (not CalculateFull/CalculateFullRebuild) only
+                # recalculates cells whose precedents actually changed, which
+                # is the entire point of Manual calculation mode. This is the
+                # single biggest speed lever in the whole run.
+                excel.Calculate()
                 wait_for_calculation(excel, pythoncom, 600)
 
                 npv = npv_rng.Value
@@ -809,11 +884,17 @@ def worker_run(worker_id, swell_path, input_path, case_dicts, worker_root, visib
                 run_macro(workbook, excel)
                 cos = cos_rng.Value
 
+                elapsed = time.monotonic() - t0
+                case_times.append(elapsed)
                 results.append(asdict(RunResult(
                     c.case_number, c.case_id, c.operator, c.lateral_display,
                     c.wps, c.zone, c.gsa, c.county, npv, aarr, cos,
-                    "SUCCESS", "", worker_id, time.monotonic() - t0
+                    "SUCCESS", "", worker_id, elapsed
                 )))
+                if len(results) % 25 == 0:
+                    avg = sum(case_times[-25:]) / len(case_times[-25:])
+                    print(f"[worker {worker_id}] {len(results)}/{len(cases)} done "
+                          f"| last-25 avg {avg:.2f}s/case", flush=True)
             except Exception as exc:
                 results.append(asdict(RunResult(
                     c.case_number, c.case_id, c.operator, c.lateral_display,
@@ -960,13 +1041,91 @@ def run_all(input_path, swell_path, cases, stats, output_path, workers=None, run
 def make_output_path(input_path, suffix):
     return input_path.parent / f"{input_path.stem}_{suffix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
 
+def diagnose_swell_workbook(swell_path):
+    """Opens the SWELL workbook once, visibly, and prints everything needed
+    to confirm/correct SWELL_CONFIG before committing to a full run."""
+    pythoncom, win32com_client = import_excel_modules()
+    pythoncom.CoInitialize()
+    excel = workbook = None
+    try:
+        excel = win32com_client.DispatchEx("Excel.Application")
+        excel.Visible = True
+        excel.DisplayAlerts = False
+        workbook = excel.Workbooks.Open(str(swell_path), UpdateLinks=0, ReadOnly=True)
+
+        print("\n=== SHEETS ===")
+        for ws in workbook.Worksheets:
+            print(f"  {ws.Name!r}")
+
+        print("\n=== NAMED RANGES ===")
+        for n in workbook.Names:
+            try:
+                print(f"  {n.Name!r} -> {n.RefersTo}")
+            except Exception:
+                print(f"  {n.Name!r} -> <unreadable>")
+        print(f"  (Config currently expects: {[SWELL_CONFIG[k] for k in ['case_name','npv_name','aarr_name','cos_input_name','price_scenario_name','econ_limit_name']]})")
+
+        print("\n=== TABLES (ListObjects) PER SHEET ===")
+        for ws in workbook.Worksheets:
+            if ws.ListObjects.Count:
+                for i in range(1, ws.ListObjects.Count + 1):
+                    lo = ws.ListObjects(i)
+                    cols = [lo.ListColumns(j).Name for j in range(1, lo.ListColumns.Count + 1)]
+                    print(f"  [{ws.Name}] table {lo.Name!r}: {cols}")
+
+        print("\n=== VBA MACROS (requires 'Trust access to the VBA project object model') ===")
+        try:
+            for comp in workbook.VBProject.VBComponents:
+                mod = comp.CodeModule
+                if mod.CountOfLines == 0:
+                    continue
+                for line_no in range(1, mod.CountOfLines + 1):
+                    line = mod.Lines(line_no, 1).strip()
+                    if line.lower().startswith("sub ") or line.lower().startswith("public sub "):
+                        name = line.split("(")[0].split()[-1]
+                        print(f"  {comp.Name}.{name}")
+        except Exception as exc:
+            print(f"  Could not enumerate macros ({exc}). Enable Trust access to the "
+                  f"VBA project object model in Excel Trust Center Settings > Macro Settings, "
+                  f"or just tell me the macro name(s) directly.")
+
+        print(f"\n  Config currently expects macro_candidates: {SWELL_CONFIG['macro_candidates']}")
+        print("\nUpdate SWELL_CONFIG at the top of this script to match anything that differs above.")
+        input("\nPress Enter to close the diagnostic Excel window...")
+    finally:
+        if workbook is not None:
+            try:
+                workbook.Close(SaveChanges=False)
+            except Exception:
+                pass
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
 def main(sample_fraction=1.0, sample_seed=42, output_suffix="SWELL_RESULTS", default_workers_override=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--input")
     parser.add_argument("--swell")
     parser.add_argument("--workers", type=int)
     parser.add_argument("--visible-workers", action="store_true")
+    parser.add_argument("--diagnose", action="store_true",
+                         help="Open the SWELL workbook and print its sheets, named ranges, "
+                              "tables, and macros, then exit without running any cases.")
     args = parser.parse_args()
+
+    if args.diagnose:
+        swell_path = Path(args.swell).expanduser().resolve() if args.swell else None
+        if swell_path is None:
+            swell_path = select_file("Select SWELL model workbook", [("Excel Macro Workbook", "*.xlsm"), ("All files", "*.*")])
+        if swell_path is None:
+            swell_path = Path(input("SWELL workbook path: ").strip().strip('"')).expanduser().resolve()
+        if not swell_path.exists():
+            raise FileNotFoundError(swell_path)
+        diagnose_swell_workbook(swell_path)
+        return
 
     input_path, swell_path = choose_paths(args.input, args.swell)
     print("Reading input workbook and generating valid cases...")
