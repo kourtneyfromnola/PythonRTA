@@ -290,3 +290,46 @@ def load_confirmed_future_dev(
         dev_facility,
         dev_map
     )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+confirmed_dev_well_level, confirmed_dev_facility, confirmed_dev_map = (
+    load_confirmed_future_dev(
+        CONFIRMED_DEV_WELL_LIST_FILE,
+        CONFIRMED_DEV_PRODUCTION_FILE
+    )
+)
+
+print(
+    "Confirmed future development wells:",
+    confirmed_dev_well_level[
+        "Well_Name"
+    ].nunique()
+)
+
+print(
+    "Confirmed future development facilities:",
+    confirmed_dev_facility[
+        "Facility"
+    ].nunique()
+)
