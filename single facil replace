@@ -1,0 +1,331 @@
+def plot_single_modified_plus_dev(
+    df,
+    stream="Oil"
+):
+
+    d = df.copy()
+
+    # --------------------------------------------------------
+    # SELECT OIL OR GAS COLUMNS
+    # --------------------------------------------------------
+
+    if stream == "Oil":
+
+        rmod = "Oil_BPD_Modified"
+        rcombined = "Oil_BPD_Combined"
+
+        cmod = "Cum_Oil_Modified"
+        ccombined = "Cum_Oil_Combined"
+
+        rate_unit = "BPD"
+        cum_unit = "BBL"
+
+    else:
+
+        rmod = "Gas_MCFD_Modified"
+        rcombined = "Gas_MCFD_Combined"
+
+        cmod = "Cum_Gas_Modified"
+        ccombined = "Cum_Gas_Combined"
+
+        rate_unit = "MCF/D"
+        cum_unit = "MCF"
+
+
+    # --------------------------------------------------------
+    # CLEAN DATA BEFORE PLOTTING
+    # --------------------------------------------------------
+
+    d["Date"] = pd.to_datetime(
+        d["Date"],
+        errors="coerce"
+    )
+
+    numeric_columns = [
+        rmod,
+        rcombined,
+        cmod,
+        ccombined
+    ]
+
+    for col in numeric_columns:
+
+        d[col] = pd.to_numeric(
+            d[col],
+            errors="coerce"
+        )
+
+
+    # Replace infinite values with NaN
+    d = d.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+
+    # Drop rows Matplotlib cannot safely plot
+    d = d.dropna(
+        subset=[
+            "Date",
+            rmod,
+            rcombined,
+            cmod,
+            ccombined
+        ]
+    )
+
+
+    d = (
+        d.sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+
+    if len(d) == 0:
+
+        print(
+            f"No valid {stream} plotting data found."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # CALCULATE SUMMARY VALUES
+    # --------------------------------------------------------
+
+    peak_mod = d[rmod].max()
+
+    peak_combined = d[rcombined].max()
+
+
+    final_modified_cum = (
+        d[cmod].iloc[-1]
+    )
+
+    final_combined_cum = (
+        d[ccombined].iloc[-1]
+    )
+
+
+    incremental = (
+        final_combined_cum
+        -
+        final_modified_cum
+    )
+
+
+    # Percent incremental vs Modified
+    if final_modified_cum != 0:
+
+        incremental_pct = (
+            incremental
+            /
+            final_modified_cum
+            *
+            100
+        )
+
+    else:
+
+        incremental_pct = np.nan
+
+
+    # --------------------------------------------------------
+    # CREATE FIGURE
+    # --------------------------------------------------------
+
+    fig, ax1 = plt.subplots(
+        figsize=(14, 7)
+    )
+
+    ax2 = ax1.twinx()
+
+
+    # --------------------------------------------------------
+    # RATE CURVES
+    # --------------------------------------------------------
+
+    modified_line, = ax1.plot(
+        d["Date"],
+        d[rmod],
+        linewidth=2,
+        label="Modified Profile"
+    )
+
+
+    combined_line, = ax1.plot(
+        d["Date"],
+        d[rcombined],
+        linewidth=2,
+        label=(
+            "Modified + Confirmed Future Dev"
+        )
+    )
+
+
+    # Green incremental rate area
+    ax1.fill_between(
+        d["Date"],
+        d[rmod],
+        d[rcombined],
+        color="green",
+        alpha=0.30,
+        label="Confirmed Future Dev"
+    )
+
+
+    # --------------------------------------------------------
+    # CUMULATIVE CURVES
+    # --------------------------------------------------------
+
+    modified_cum_line, = ax2.plot(
+        d["Date"],
+        d[cmod],
+        linestyle="--",
+        linewidth=2,
+        label="Modified Cumulative"
+    )
+
+
+    combined_cum_line, = ax2.plot(
+        d["Date"],
+        d[ccombined],
+        linestyle="--",
+        linewidth=2,
+        label=(
+            "Modified + Confirmed Future Dev "
+            "Cumulative"
+        )
+    )
+
+
+    # Green incremental cumulative area
+    ax2.fill_between(
+        d["Date"],
+        d[cmod],
+        d[ccombined],
+        color="green",
+        alpha=0.10
+    )
+
+
+    # --------------------------------------------------------
+    # PEAK-RATE / INCREMENT NOTE
+    # --------------------------------------------------------
+
+    if np.isfinite(incremental_pct):
+
+        incremental_pct_text = (
+            f"{incremental_pct:+.2f}%"
+        )
+
+    else:
+
+        incremental_pct_text = "N/A"
+
+
+    note = (
+        f"Peak Modified: "
+        f"{peak_mod:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Peak w/ Confirmed Dev: "
+        f"{peak_combined:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Confirmed Dev Increment: "
+        f"{incremental:,.0f} "
+        f"{cum_unit}\n"
+
+        f"Increment vs Modified: "
+        f"{incremental_pct_text}"
+    )
+
+
+    ax1.text(
+        0.015,
+        0.97,
+        note,
+
+        transform=ax1.transAxes,
+
+        va="top",
+        ha="left",
+
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            alpha=0.88
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # AXIS LABELS
+    # --------------------------------------------------------
+
+    ax1.set_title(
+        f"{FACILITY_TO_PLOT} - "
+        f"{stream}: Modified + "
+        f"Confirmed Future Dev"
+    )
+
+
+    ax1.set_xlabel(
+        "Date"
+    )
+
+
+    ax1.set_ylabel(
+        f"{stream} Rate "
+        f"({rate_unit})"
+    )
+
+
+    ax2.set_ylabel(
+        f"Cumulative {stream} "
+        f"({cum_unit})"
+    )
+
+
+    ax1.grid(
+        True,
+        alpha=0.30
+    )
+
+
+    # --------------------------------------------------------
+    # LEGEND
+    # --------------------------------------------------------
+
+    handles = [
+        modified_line,
+        combined_line,
+        modified_cum_line,
+        combined_cum_line
+    ]
+
+
+    labels = [
+        "Modified Profile",
+        "Modified + Confirmed Future Dev",
+        "Modified Cumulative",
+        "Modified + Confirmed Future Dev Cumulative"
+    ]
+
+
+    ax1.legend(
+        handles,
+        labels,
+        loc="upper right"
+    )
+
+
+    # --------------------------------------------------------
+    # FINISH
+    # --------------------------------------------------------
+
+    fig.tight_layout()
+
+    plt.show()
