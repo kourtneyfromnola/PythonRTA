@@ -1,0 +1,1713 @@
+# ============================================================
+# MULTI-FACILITY CONFIRMED FUTURE DEVELOPMENT
+# FULL ADD-ON BLOCK
+# JUPYTERLITE / CSV VERSION
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+CONFIRMED_DEV_WELL_LIST_FILE = "Certain_Dev_Well_List.csv"
+CONFIRMED_DEV_PRODUCTION_FILE = "Certain_Dev_Production.csv"
+
+SAVE_DEV_PLOTS = True
+
+
+# Horizontal development production layout
+DEV_BLOCK_WIDTH = 7
+
+DEV_DATE_OFFSET = 0
+DEV_OIL_OFFSET = 2
+DEV_GAS_OFFSET = 4
+
+
+# ============================================================
+# WELL NAME NORMALIZATION
+# ============================================================
+
+def normalize_dev_well_name(name):
+
+    if pd.isna(name):
+        return ""
+
+    return (
+        str(name)
+        .strip()
+        .upper()
+    )
+
+
+# ============================================================
+# ROBUST FUTURE DEVELOPMENT DATE PARSER
+# ============================================================
+
+def parse_dev_dates(series):
+
+    s = series.copy()
+
+    parsed = pd.Series(
+        pd.NaT,
+        index=s.index,
+        dtype="datetime64[ns]"
+    )
+
+
+    text_values = (
+        s.astype(str)
+        .str.strip()
+    )
+
+
+    # --------------------------------------------------------
+    # Try Jan-26 / Feb-27 style
+    # --------------------------------------------------------
+
+    month_year = pd.to_datetime(
+        text_values,
+        format="%b-%y",
+        errors="coerce"
+    )
+
+    good = month_year.notna()
+
+    parsed.loc[
+        good
+    ] = month_year.loc[
+        good
+    ]
+
+
+    # --------------------------------------------------------
+    # Try other normal date formats
+    # --------------------------------------------------------
+
+    missing = parsed.isna()
+
+    if missing.any():
+
+        general = pd.to_datetime(
+            text_values[missing],
+            errors="coerce"
+        )
+
+        good_general = general.notna()
+
+        parsed.loc[
+            general.index[good_general]
+        ] = general.loc[
+            good_general
+        ]
+
+
+    # --------------------------------------------------------
+    # Try Excel serial dates
+    # --------------------------------------------------------
+
+    missing = parsed.isna()
+
+    if missing.any():
+
+        numeric = pd.to_numeric(
+            s[missing],
+            errors="coerce"
+        )
+
+        excel_mask = (
+            numeric.notna()
+            &
+            (numeric >= 1)
+            &
+            (numeric <= 150000)
+        )
+
+        if excel_mask.any():
+
+            excel_dates = pd.to_datetime(
+                numeric[excel_mask],
+                unit="D",
+                origin="1899-12-30",
+                errors="coerce"
+            )
+
+            parsed.loc[
+                excel_dates.index
+            ] = excel_dates
+
+
+    # --------------------------------------------------------
+    # Restrict to sensible confirmed-development dates
+    # --------------------------------------------------------
+
+    valid = (
+        parsed.notna()
+        &
+        (parsed.dt.year >= 2026)
+        &
+        (parsed.dt.year <= 2100)
+    )
+
+    parsed = parsed.where(
+        valid,
+        pd.NaT
+    )
+
+
+    # Normalize to month start
+    parsed = (
+        parsed
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+
+    return parsed
+
+
+# ============================================================
+# LOAD CONFIRMED FUTURE DEVELOPMENT
+# ============================================================
+
+def load_confirmed_future_dev_multi(
+    well_list_file,
+    production_file
+):
+
+    # --------------------------------------------------------
+    # WELL LIST
+    #
+    # A = Well Name
+    # B = POP
+    # C = API10
+    # D = Facility
+    # --------------------------------------------------------
+
+    dev_map_raw = pd.read_csv(
+        well_list_file
+    )
+
+    dev_map = dev_map_raw.iloc[
+        :,
+        [0, 3]
+    ].copy()
+
+    dev_map.columns = [
+        "Well_Name",
+        "Facility"
+    ]
+
+
+    dev_map["Well_Name"] = (
+        dev_map["Well_Name"]
+        .astype(str)
+        .str.strip()
+    )
+
+
+    dev_map["Facility"] = (
+        dev_map["Facility"]
+        .astype(str)
+        .str.strip()
+    )
+
+
+    dev_map["Match_Name"] = (
+        dev_map["Well_Name"]
+        .apply(normalize_dev_well_name)
+    )
+
+
+    dev_map = dev_map[
+        dev_map["Match_Name"] != ""
+    ].copy()
+
+
+    # --------------------------------------------------------
+    # Make sure one well is not assigned to two facilities
+    # --------------------------------------------------------
+
+    facility_counts = (
+        dev_map
+        .groupby("Match_Name")[
+            "Facility"
+        ]
+        .nunique()
+    )
+
+    bad = facility_counts[
+        facility_counts > 1
+    ]
+
+    if len(bad) > 0:
+
+        raise ValueError(
+            "A Confirmed Future Dev well is "
+            "assigned to multiple facilities: "
+            +
+            ", ".join(
+                bad.index[:10]
+            )
+        )
+
+
+    dev_map = (
+        dev_map
+        .drop_duplicates(
+            "Match_Name"
+        )
+        .reset_index(drop=True)
+    )
+
+
+    # ========================================================
+    # READ HORIZONTAL DEVELOPMENT PRODUCTION CSV
+    # ========================================================
+
+    raw = pd.read_csv(
+        production_file,
+        header=None
+    )
+
+
+    records = []
+
+    ncols = raw.shape[1]
+
+
+    # ========================================================
+    # LOOP THROUGH EACH 7-COLUMN WELL BLOCK
+    # ========================================================
+
+    for start_col in range(
+        0,
+        ncols,
+        DEV_BLOCK_WIDTH
+    ):
+
+        if start_col >= ncols:
+            break
+
+
+        raw_well_name = raw.iloc[
+            0,
+            start_col
+        ]
+
+
+        if pd.isna(
+            raw_well_name
+        ):
+            continue
+
+
+        well_name = str(
+            raw_well_name
+        ).strip()
+
+
+        if (
+            well_name == ""
+            or
+            well_name.lower() == "nan"
+        ):
+            continue
+
+
+        if (
+            start_col + DEV_GAS_OFFSET
+            >= ncols
+        ):
+            continue
+
+
+        # ----------------------------------------------------
+        # Excel row 5 = pandas row index 4
+        # ----------------------------------------------------
+
+        date_series = raw.iloc[
+            4:,
+            start_col + DEV_DATE_OFFSET
+        ]
+
+
+        oil_series = raw.iloc[
+            4:,
+            start_col + DEV_OIL_OFFSET
+        ]
+
+
+        gas_series = raw.iloc[
+            4:,
+            start_col + DEV_GAS_OFFSET
+        ]
+
+
+        temp = pd.DataFrame({
+
+            "Well_Name":
+                well_name,
+
+            "Date":
+                date_series.values,
+
+            "Oil_BBL":
+                oil_series.values,
+
+            "Gas_MCF":
+                gas_series.values
+
+        })
+
+
+        # ----------------------------------------------------
+        # Parse dates
+        # ----------------------------------------------------
+
+        temp["Date"] = parse_dev_dates(
+            temp["Date"]
+        )
+
+
+        temp = temp[
+            temp["Date"].notna()
+        ].copy()
+
+
+        if len(temp) == 0:
+            continue
+
+
+        # ----------------------------------------------------
+        # Monthly volumes
+        # ----------------------------------------------------
+
+        temp["Oil_BBL"] = pd.to_numeric(
+            temp["Oil_BBL"],
+            errors="coerce"
+        ).fillna(0)
+
+
+        temp["Gas_MCF"] = pd.to_numeric(
+            temp["Gas_MCF"],
+            errors="coerce"
+        ).fillna(0)
+
+
+        temp[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ] = (
+            temp[
+                [
+                    "Oil_BBL",
+                    "Gas_MCF"
+                ]
+            ]
+            .replace(
+                [np.inf, -np.inf],
+                0
+            )
+        )
+
+
+        temp["Match_Name"] = (
+            temp["Well_Name"]
+            .apply(
+                normalize_dev_well_name
+            )
+        )
+
+
+        records.append(
+            temp
+        )
+
+
+    # ========================================================
+    # VALIDATE RESULTS
+    # ========================================================
+
+    if len(records) == 0:
+
+        raise ValueError(
+            "No Confirmed Future Development "
+            "well blocks were found."
+        )
+
+
+    dev = pd.concat(
+        records,
+        ignore_index=True
+    )
+
+
+    # ========================================================
+    # ATTACH FACILITY
+    # ========================================================
+
+    dev = dev.merge(
+
+        dev_map[
+            [
+                "Match_Name",
+                "Facility"
+            ]
+        ],
+
+        on="Match_Name",
+
+        how="left"
+
+    )
+
+
+    # ========================================================
+    # QA UNMAPPED FUTURE WELLS
+    # ========================================================
+
+    missing_facility = (
+
+        dev.loc[
+            dev["Facility"].isna(),
+            "Well_Name"
+        ]
+
+        .drop_duplicates()
+
+        .tolist()
+
+    )
+
+
+    if len(
+        missing_facility
+    ) > 0:
+
+        print()
+        print(
+            "WARNING: Confirmed Future Dev wells "
+            "without facility match:"
+        )
+
+        for well in missing_facility:
+
+            print(
+                "   ",
+                well
+            )
+
+        print()
+
+
+    # Only mapped wells contribute
+    dev = dev[
+        dev["Facility"].notna()
+    ].copy()
+
+
+    # ========================================================
+    # AGGREGATE DEVELOPMENT BY FACILITY / MONTH
+    # ========================================================
+
+    dev_facility = (
+
+        dev.groupby(
+            [
+                "Facility",
+                "Date"
+            ],
+            as_index=False
+        )[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ]
+
+        .sum()
+
+        .sort_values(
+            [
+                "Facility",
+                "Date"
+            ]
+        )
+
+        .reset_index(drop=True)
+
+    )
+
+
+    return (
+        dev,
+        dev_facility,
+        dev_map
+    )
+
+
+# ============================================================
+# LOAD DEVELOPMENT DATA
+# ============================================================
+
+confirmed_dev_well_level, confirmed_dev_facility, confirmed_dev_map = (
+    load_confirmed_future_dev_multi(
+
+        CONFIRMED_DEV_WELL_LIST_FILE,
+
+        CONFIRMED_DEV_PRODUCTION_FILE
+
+    )
+)
+
+
+print()
+
+print(
+    "Confirmed Future Development loaded."
+)
+
+print(
+    "Development wells:",
+    confirmed_dev_well_level[
+        "Well_Name"
+    ].nunique()
+)
+
+print(
+    "Development facilities:",
+    confirmed_dev_facility[
+        "Facility"
+    ].nunique()
+)
+
+print(
+    "Development date range:",
+    confirmed_dev_well_level[
+        "Date"
+    ].min(),
+    "to",
+    confirmed_dev_well_level[
+        "Date"
+    ].max()
+)
+
+print()
+
+
+# ============================================================
+# MERGE CONFIRMED DEVELOPMENT WITH MODIFIED FACILITY PROFILES
+#
+# Requires existing dataframe:
+#
+# modified_facility
+#
+# with:
+# Facility
+# Date
+# Oil_BBL
+# Gas_MCF
+# ============================================================
+
+modified_plus_dev_multi = pd.merge(
+
+    modified_facility[
+        [
+            "Facility",
+            "Date",
+            "Oil_BBL",
+            "Gas_MCF"
+        ]
+    ],
+
+    confirmed_dev_facility[
+        [
+            "Facility",
+            "Date",
+            "Oil_BBL",
+            "Gas_MCF"
+        ]
+    ],
+
+    on=[
+        "Facility",
+        "Date"
+    ],
+
+    how="outer",
+
+    suffixes=(
+        "_Modified",
+        "_Dev"
+    )
+
+)
+
+
+modified_plus_dev_multi = (
+
+    modified_plus_dev_multi
+    .sort_values(
+        [
+            "Facility",
+            "Date"
+        ]
+    )
+    .reset_index(drop=True)
+
+)
+
+
+# ============================================================
+# CLEAN MONTHLY VOLUMES
+# ============================================================
+
+for col in [
+
+    "Oil_BBL_Modified",
+    "Gas_MCF_Modified",
+    "Oil_BBL_Dev",
+    "Gas_MCF_Dev"
+
+]:
+
+    modified_plus_dev_multi[
+        col
+    ] = pd.to_numeric(
+
+        modified_plus_dev_multi[
+            col
+        ],
+
+        errors="coerce"
+
+    ).fillna(0)
+
+
+modified_plus_dev_multi = (
+    modified_plus_dev_multi
+    .replace(
+        [np.inf, -np.inf],
+        0
+    )
+)
+
+
+# ============================================================
+# COMBINED MONTHLY VOLUMES
+# ============================================================
+
+modified_plus_dev_multi[
+    "Oil_BBL_Combined"
+] = (
+
+    modified_plus_dev_multi[
+        "Oil_BBL_Modified"
+    ]
+
+    +
+
+    modified_plus_dev_multi[
+        "Oil_BBL_Dev"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Gas_MCF_Combined"
+] = (
+
+    modified_plus_dev_multi[
+        "Gas_MCF_Modified"
+    ]
+
+    +
+
+    modified_plus_dev_multi[
+        "Gas_MCF_Dev"
+    ]
+
+)
+
+
+# ============================================================
+# DAILY RATES
+# ============================================================
+
+modified_plus_dev_multi[
+    "Days_In_Month"
+] = (
+
+    modified_plus_dev_multi[
+        "Date"
+    ]
+    .dt.days_in_month
+
+)
+
+
+modified_plus_dev_multi[
+    "Oil_BPD_Modified"
+] = (
+
+    modified_plus_dev_multi[
+        "Oil_BBL_Modified"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Oil_BPD_Dev"
+] = (
+
+    modified_plus_dev_multi[
+        "Oil_BBL_Dev"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Oil_BPD_Combined"
+] = (
+
+    modified_plus_dev_multi[
+        "Oil_BBL_Combined"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Gas_MCFD_Modified"
+] = (
+
+    modified_plus_dev_multi[
+        "Gas_MCF_Modified"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Gas_MCFD_Dev"
+] = (
+
+    modified_plus_dev_multi[
+        "Gas_MCF_Dev"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+modified_plus_dev_multi[
+    "Gas_MCFD_Combined"
+] = (
+
+    modified_plus_dev_multi[
+        "Gas_MCF_Combined"
+    ]
+
+    /
+
+    modified_plus_dev_multi[
+        "Days_In_Month"
+    ]
+
+)
+
+
+# ============================================================
+# CUMULATIVE VOLUMES
+#
+# IMPORTANT:
+# Calculate separately WITHIN EACH FACILITY.
+# ============================================================
+
+modified_plus_dev_multi[
+    "Cum_Oil_Modified"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Oil_BBL_Modified"
+    ]
+    .cumsum()
+
+)
+
+
+modified_plus_dev_multi[
+    "Cum_Oil_Dev"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Oil_BBL_Dev"
+    ]
+    .cumsum()
+
+)
+
+
+modified_plus_dev_multi[
+    "Cum_Oil_Combined"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Oil_BBL_Combined"
+    ]
+    .cumsum()
+
+)
+
+
+modified_plus_dev_multi[
+    "Cum_Gas_Modified"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Gas_MCF_Modified"
+    ]
+    .cumsum()
+
+)
+
+
+modified_plus_dev_multi[
+    "Cum_Gas_Dev"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Gas_MCF_Dev"
+    ]
+    .cumsum()
+
+)
+
+
+modified_plus_dev_multi[
+    "Cum_Gas_Combined"
+] = (
+
+    modified_plus_dev_multi
+    .groupby(
+        "Facility"
+    )[
+        "Gas_MCF_Combined"
+    ]
+    .cumsum()
+
+)
+
+
+# ============================================================
+# MATHEMATICAL QA
+#
+# These should be zero or essentially zero.
+# ============================================================
+
+oil_qa = (
+
+    modified_plus_dev_multi[
+        "Cum_Oil_Combined"
+    ]
+
+    -
+
+    modified_plus_dev_multi[
+        "Cum_Oil_Modified"
+    ]
+
+    -
+
+    modified_plus_dev_multi[
+        "Cum_Oil_Dev"
+    ]
+
+).abs().max()
+
+
+gas_qa = (
+
+    modified_plus_dev_multi[
+        "Cum_Gas_Combined"
+    ]
+
+    -
+
+    modified_plus_dev_multi[
+        "Cum_Gas_Modified"
+    ]
+
+    -
+
+    modified_plus_dev_multi[
+        "Cum_Gas_Dev"
+    ]
+
+).abs().max()
+
+
+print(
+    "Oil cumulative QA check:",
+    oil_qa
+)
+
+print(
+    "Gas cumulative QA check:",
+    gas_qa
+)
+
+
+# ============================================================
+# SAFE FILENAME FUNCTION
+# ============================================================
+
+def safe_dev_filename(
+    value
+):
+
+    import re
+
+    return (
+        re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "_",
+            str(value).strip()
+        )
+        .strip("_")
+    )
+
+
+# ============================================================
+# MULTI-FACILITY PLOTTING FUNCTION
+# ============================================================
+
+def plot_multi_modified_plus_dev(
+    df,
+    facility,
+    stream="Oil"
+):
+
+    d = (
+
+        df[
+            df["Facility"]
+            ==
+            facility
+        ]
+
+        .copy()
+
+    )
+
+
+    # --------------------------------------------------------
+    # SELECT STREAM
+    # --------------------------------------------------------
+
+    if stream == "Oil":
+
+        rmod = "Oil_BPD_Modified"
+        rdev = "Oil_BPD_Dev"
+        rcombined = "Oil_BPD_Combined"
+
+        cmod = "Cum_Oil_Modified"
+        cdev = "Cum_Oil_Dev"
+        ccombined = "Cum_Oil_Combined"
+
+        rate_unit = "BPD"
+        cum_unit = "BBL"
+
+    else:
+
+        rmod = "Gas_MCFD_Modified"
+        rdev = "Gas_MCFD_Dev"
+        rcombined = "Gas_MCFD_Combined"
+
+        cmod = "Cum_Gas_Modified"
+        cdev = "Cum_Gas_Dev"
+        ccombined = "Cum_Gas_Combined"
+
+        rate_unit = "MCF/D"
+        cum_unit = "MCF"
+
+
+    # --------------------------------------------------------
+    # CLEAN DATES
+    # --------------------------------------------------------
+
+    d["Date"] = pd.to_datetime(
+        d["Date"],
+        errors="coerce"
+    )
+
+
+    d = d[
+        d["Date"].notna()
+    ].copy()
+
+
+    d = d[
+        (d["Date"].dt.year >= 2026)
+        &
+        (d["Date"].dt.year <= 2100)
+    ].copy()
+
+
+    # --------------------------------------------------------
+    # CLEAN NUMERIC VALUES
+    # --------------------------------------------------------
+
+    for col in [
+
+        rmod,
+        rdev,
+        rcombined,
+        cmod,
+        cdev,
+        ccombined
+
+    ]:
+
+        d[col] = pd.to_numeric(
+            d[col],
+            errors="coerce"
+        ).fillna(0)
+
+
+    d = (
+
+        d.sort_values(
+            "Date"
+        )
+
+        .reset_index(
+            drop=True
+        )
+
+    )
+
+
+    if len(d) == 0:
+
+        print(
+            f"No valid {stream} "
+            f"data for {facility}"
+        )
+
+        return None
+
+
+    # --------------------------------------------------------
+    # PYTHON DATETIME VALUES
+    # --------------------------------------------------------
+
+    x = list(
+        d["Date"]
+        .dt.to_pydatetime()
+    )
+
+
+    modified_rate = (
+        d[rmod]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    dev_rate = (
+        d[rdev]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    combined_rate = (
+        d[rcombined]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    modified_cum = (
+        d[cmod]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    dev_cum = (
+        d[cdev]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    combined_cum = (
+        d[ccombined]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    # ========================================================
+    # SUMMARY VALUES
+    # ========================================================
+
+    peak_modified = np.max(
+        modified_rate
+    )
+
+
+    peak_combined = np.max(
+        combined_rate
+    )
+
+
+    peak_dev_addition = np.max(
+        dev_rate
+    )
+
+
+    final_modified = (
+        modified_cum[-1]
+    )
+
+
+    final_dev = (
+        dev_cum[-1]
+    )
+
+
+    final_combined = (
+        combined_cum[-1]
+    )
+
+
+    increment = (
+        final_combined
+        -
+        final_modified
+    )
+
+
+    if final_modified != 0:
+
+        increment_pct = (
+
+            increment
+            /
+            final_modified
+            *
+            100
+
+        )
+
+        pct_text = (
+            f"{increment_pct:+.2f}%"
+        )
+
+    else:
+
+        increment_pct = np.nan
+        pct_text = "N/A"
+
+
+    # ========================================================
+    # FIGURE
+    # ========================================================
+
+    fig, ax1 = plt.subplots(
+        figsize=(14, 7)
+    )
+
+    ax2 = ax1.twinx()
+
+
+    # ========================================================
+    # RATE
+    # ========================================================
+
+    modified_line, = ax1.plot(
+
+        x,
+
+        modified_rate,
+
+        linewidth=2,
+
+        label="Modified Profile"
+
+    )
+
+
+    combined_line, = ax1.plot(
+
+        x,
+
+        combined_rate,
+
+        linewidth=2,
+
+        label=(
+            "Modified + Confirmed Future Dev"
+        )
+
+    )
+
+
+    # Green incremental rate
+    ax1.fill_between(
+
+        x,
+
+        modified_rate,
+
+        combined_rate,
+
+        color="green",
+
+        alpha=0.30
+
+    )
+
+
+    # ========================================================
+    # CUMULATIVE
+    # ========================================================
+
+    modified_cum_line, = ax2.plot(
+
+        x,
+
+        modified_cum,
+
+        linestyle="--",
+
+        linewidth=2,
+
+        label="Modified Cumulative"
+
+    )
+
+
+    combined_cum_line, = ax2.plot(
+
+        x,
+
+        combined_cum,
+
+        linestyle="--",
+
+        linewidth=2,
+
+        label=(
+            "Modified + Confirmed Future Dev "
+            "Cumulative"
+        )
+
+    )
+
+
+    # Green cumulative increment
+    ax2.fill_between(
+
+        x,
+
+        modified_cum,
+
+        combined_cum,
+
+        color="green",
+
+        alpha=0.10
+
+    )
+
+
+    # ========================================================
+    # ANNOTATION
+    # ========================================================
+
+    note = (
+
+        f"Peak Modified: "
+        f"{peak_modified:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Peak w/ Confirmed Dev: "
+        f"{peak_combined:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Max Confirmed Dev Addition: "
+        f"{peak_dev_addition:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Confirmed Dev Increment: "
+        f"{increment:,.0f} "
+        f"{cum_unit}\n"
+
+        f"Increment vs Modified: "
+        f"{pct_text}"
+
+    )
+
+
+    ax1.text(
+
+        0.015,
+
+        0.97,
+
+        note,
+
+        transform=ax1.transAxes,
+
+        va="top",
+
+        ha="left",
+
+        bbox=dict(
+
+            boxstyle="round",
+
+            facecolor="white",
+
+            alpha=0.85
+
+        )
+
+    )
+
+
+    # ========================================================
+    # LABELS
+    # ========================================================
+
+    ax1.set_title(
+
+        f"{facility} - "
+        f"{stream}: Modified + "
+        f"Confirmed Future Dev"
+
+    )
+
+
+    ax1.set_xlabel(
+        "Date"
+    )
+
+
+    ax1.set_ylabel(
+
+        f"{stream} Rate "
+        f"({rate_unit})"
+
+    )
+
+
+    ax2.set_ylabel(
+
+        f"Cumulative {stream} "
+        f"({cum_unit})"
+
+    )
+
+
+    ax1.grid(
+        True,
+        alpha=0.30
+    )
+
+
+    # ========================================================
+    # LEGEND
+    # ========================================================
+
+    ax1.legend(
+
+        [
+
+            modified_line,
+
+            combined_line,
+
+            modified_cum_line,
+
+            combined_cum_line
+
+        ],
+
+        [
+
+            "Modified Profile",
+
+            "Modified + Confirmed Future Dev",
+
+            "Modified Cumulative",
+
+            "Modified + Confirmed Future Dev Cumulative"
+
+        ],
+
+        loc="upper right"
+
+    )
+
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    if SAVE_DEV_PLOTS:
+
+        file_name = (
+
+            safe_dev_filename(
+                facility
+            )
+
+            +
+
+            f"_{stream}_Modified_Plus_Confirmed_Dev.png"
+
+        )
+
+        fig.savefig(
+
+            file_name,
+
+            dpi=160,
+
+            bbox_inches="tight"
+
+        )
+
+
+    # ========================================================
+    # SHOW
+    # ========================================================
+
+    plt.show()
+
+
+    # ========================================================
+    # RETURN SUMMARY ROW
+    # ========================================================
+
+    return {
+
+        "Facility":
+            facility,
+
+        "Stream":
+            stream,
+
+        "Peak_Modified_Rate":
+            peak_modified,
+
+        "Peak_With_Confirmed_Dev_Rate":
+            peak_combined,
+
+        "Max_Confirmed_Dev_Addition":
+            peak_dev_addition,
+
+        "Rate_Units":
+            rate_unit,
+
+        "Modified_Cumulative":
+            final_modified,
+
+        "Confirmed_Dev_Cumulative":
+            final_dev,
+
+        "Combined_Cumulative":
+            final_combined,
+
+        "Confirmed_Dev_Increment":
+            increment,
+
+        "Increment_Pct_vs_Modified":
+            increment_pct,
+
+        "Cumulative_Units":
+            cum_unit
+
+    }
+
+
+# ============================================================
+# CREATE TWO PLOTS FOR EVERY FACILITY
+# ============================================================
+
+dev_summary_rows = []
+
+
+facilities = sorted(
+
+    modified_plus_dev_multi[
+        "Facility"
+    ]
+
+    .dropna()
+
+    .unique()
+
+)
+
+
+for facility in facilities:
+
+    print()
+    print(
+        "=" * 80
+    )
+
+    print(
+        facility
+    )
+
+    print(
+        "=" * 80
+    )
+
+
+    oil_result = (
+        plot_multi_modified_plus_dev(
+
+            modified_plus_dev_multi,
+
+            facility,
+
+            stream="Oil"
+
+        )
+    )
+
+
+    if oil_result is not None:
+
+        dev_summary_rows.append(
+            oil_result
+        )
+
+
+    gas_result = (
+        plot_multi_modified_plus_dev(
+
+            modified_plus_dev_multi,
+
+            facility,
+
+            stream="Gas"
+
+        )
+    )
+
+
+    if gas_result is not None:
+
+        dev_summary_rows.append(
+            gas_result
+        )
+
+
+# ============================================================
+# SUMMARY TABLE
+# ============================================================
+
+confirmed_dev_facility_summary = pd.DataFrame(
+    dev_summary_rows
+)
+
+
+display(
+    confirmed_dev_facility_summary
+)
+
+
+# ============================================================
+# SAVE OUTPUTS
+# ============================================================
+
+modified_plus_dev_multi.to_csv(
+
+    "Facility_Modified_Plus_Confirmed_Dev_Profiles.csv",
+
+    index=False
+
+)
+
+
+confirmed_dev_facility_summary.to_csv(
+
+    "Facility_Confirmed_Dev_Summary.csv",
+
+    index=False
+
+)
+
+
+print()
+print(
+    "Confirmed Future Development "
+    "multi-facility analysis complete."
+)
