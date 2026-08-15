@@ -1,0 +1,383 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
+def plot_single_modified_plus_dev(df, stream="Oil"):
+
+    # ========================================================
+    # COPY DATA
+    # ========================================================
+
+    d = df.copy()
+
+
+    # ========================================================
+    # SELECT OIL OR GAS
+    # ========================================================
+
+    if stream == "Oil":
+
+        rmod = "Oil_BPD_Modified"
+        rcombined = "Oil_BPD_Combined"
+
+        cmod = "Cum_Oil_Modified"
+        ccombined = "Cum_Oil_Combined"
+
+        rate_unit = "BPD"
+        cum_unit = "BBL"
+
+    else:
+
+        rmod = "Gas_MCFD_Modified"
+        rcombined = "Gas_MCFD_Combined"
+
+        cmod = "Cum_Gas_Modified"
+        ccombined = "Cum_Gas_Combined"
+
+        rate_unit = "MCF/D"
+        cum_unit = "MCF"
+
+
+    # ========================================================
+    # CLEAN DATES
+    # ========================================================
+
+    d["Date"] = pd.to_datetime(
+        d["Date"],
+        errors="coerce"
+    )
+
+
+    # Explicitly eliminate impossible dates
+    d = d[
+        d["Date"].notna()
+    ].copy()
+
+    d = d[
+        (d["Date"].dt.year >= 1900)
+        &
+        (d["Date"].dt.year <= 2200)
+    ].copy()
+
+
+    # ========================================================
+    # CLEAN NUMERIC DATA
+    # ========================================================
+
+    for col in [
+        rmod,
+        rcombined,
+        cmod,
+        ccombined
+    ]:
+
+        d[col] = pd.to_numeric(
+            d[col],
+            errors="coerce"
+        )
+
+
+    d = d.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+
+    d = d.dropna(
+        subset=[
+            rmod,
+            rcombined,
+            cmod,
+            ccombined
+        ]
+    )
+
+
+    d = (
+        d.sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+
+    if len(d) == 0:
+
+        print(
+            f"No valid {stream} data found."
+        )
+
+        return
+
+
+    # ========================================================
+    # IMPORTANT:
+    # USE ORDINARY PYTHON DATETIMES
+    # DO NOT USE mdates.date2num()
+    # ========================================================
+
+    x = list(
+        d["Date"].dt.to_pydatetime()
+    )
+
+
+    modified_rate = (
+        d[rmod]
+        .to_numpy(dtype=float)
+    )
+
+    combined_rate = (
+        d[rcombined]
+        .to_numpy(dtype=float)
+    )
+
+    modified_cum = (
+        d[cmod]
+        .to_numpy(dtype=float)
+    )
+
+    combined_cum = (
+        d[ccombined]
+        .to_numpy(dtype=float)
+    )
+
+
+    # ========================================================
+    # QA PRINT
+    # ========================================================
+
+    print(
+        f"{stream} plot date range:",
+        d["Date"].min(),
+        "to",
+        d["Date"].max()
+    )
+
+
+    # ========================================================
+    # SUMMARY VALUES
+    # ========================================================
+
+    peak_modified = np.max(
+        modified_rate
+    )
+
+    peak_combined = np.max(
+        combined_rate
+    )
+
+
+    final_modified_cum = (
+        modified_cum[-1]
+    )
+
+    final_combined_cum = (
+        combined_cum[-1]
+    )
+
+
+    incremental = (
+        final_combined_cum
+        -
+        final_modified_cum
+    )
+
+
+    if final_modified_cum != 0:
+
+        incremental_pct = (
+            incremental
+            /
+            final_modified_cum
+            *
+            100
+        )
+
+        pct_text = (
+            f"{incremental_pct:+.2f}%"
+        )
+
+    else:
+
+        pct_text = "N/A"
+
+
+    # ========================================================
+    # CREATE PLOT
+    # ========================================================
+
+    fig, ax1 = plt.subplots(
+        figsize=(14, 7)
+    )
+
+    ax2 = ax1.twinx()
+
+
+    # ========================================================
+    # RATE
+    # ========================================================
+
+    modified_line, = ax1.plot(
+        x,
+        modified_rate,
+        linewidth=2,
+        label="Modified Profile"
+    )
+
+
+    combined_line, = ax1.plot(
+        x,
+        combined_rate,
+        linewidth=2,
+        label=(
+            "Modified + Confirmed Future Dev"
+        )
+    )
+
+
+    # Green incremental development
+    ax1.fill_between(
+        x,
+        modified_rate,
+        combined_rate,
+        color="green",
+        alpha=0.30
+    )
+
+
+    # ========================================================
+    # CUMULATIVE
+    # ========================================================
+
+    modified_cum_line, = ax2.plot(
+        x,
+        modified_cum,
+        linestyle="--",
+        linewidth=2,
+        label="Modified Cumulative"
+    )
+
+
+    combined_cum_line, = ax2.plot(
+        x,
+        combined_cum,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            "Modified + Confirmed Future Dev "
+            "Cumulative"
+        )
+    )
+
+
+    ax2.fill_between(
+        x,
+        modified_cum,
+        combined_cum,
+        color="green",
+        alpha=0.10
+    )
+
+
+    # ========================================================
+    # ANNOTATION
+    # ========================================================
+
+    note = (
+        f"Peak Modified: "
+        f"{peak_modified:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Peak w/ Confirmed Dev: "
+        f"{peak_combined:,.0f} "
+        f"{rate_unit}\n"
+
+        f"Confirmed Dev Increment: "
+        f"{incremental:,.0f} "
+        f"{cum_unit}\n"
+
+        f"Increment vs Modified: "
+        f"{pct_text}"
+    )
+
+
+    ax1.text(
+        0.015,
+        0.97,
+        note,
+
+        transform=ax1.transAxes,
+
+        va="top",
+        ha="left",
+
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            alpha=0.85
+        )
+    )
+
+
+    # ========================================================
+    # LABELS
+    # ========================================================
+
+    ax1.set_title(
+        f"{FACILITY_TO_PLOT} - "
+        f"{stream}: Modified + "
+        f"Confirmed Future Dev"
+    )
+
+
+    ax1.set_xlabel(
+        "Date"
+    )
+
+
+    ax1.set_ylabel(
+        f"{stream} Rate "
+        f"({rate_unit})"
+    )
+
+
+    ax2.set_ylabel(
+        f"Cumulative {stream} "
+        f"({cum_unit})"
+    )
+
+
+    ax1.grid(
+        True,
+        alpha=0.30
+    )
+
+
+    # ========================================================
+    # LEGEND
+    # ========================================================
+
+    ax1.legend(
+
+        [
+            modified_line,
+            combined_line,
+            modified_cum_line,
+            combined_cum_line
+        ],
+
+        [
+            "Modified Profile",
+            "Modified + Confirmed Future Dev",
+            "Modified Cumulative",
+            "Modified + Confirmed Future Dev Cumulative"
+        ],
+
+        loc="upper right"
+    )
+
+
+    # ========================================================
+    # SHOW
+    # ========================================================
+
+    plt.show()
