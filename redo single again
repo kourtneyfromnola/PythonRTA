@@ -1,0 +1,712 @@
+# ============================================================
+# CONFIRMED FUTURE DEVELOPMENT
+# FULL FIXED LOADING BLOCK
+# JUPYTERLITE / CSV VERSION
+# ============================================================
+
+import pandas as pd
+import numpy as np
+
+
+# ------------------------------------------------------------
+# FILE NAMES
+# ------------------------------------------------------------
+
+CONFIRMED_DEV_WELL_LIST_FILE = "Certain_Dev_Well_List.csv"
+CONFIRMED_DEV_PRODUCTION_FILE = "Certain_Dev_Production.csv"
+
+
+# ------------------------------------------------------------
+# DEVELOPMENT PRODUCTION FILE LAYOUT
+#
+# Each well occupies 7 columns:
+#
+# 0 = Date
+# 1 = Well Count
+# 2 = Oil Volume (BBL/month)
+# 3 = Oil Cumulative
+# 4 = Gas Volume (MCF/month)
+# 5 = Gas Cumulative
+# 6 = spacer / unused
+#
+# Well name is in row 1 of each block.
+# Monthly data begins in row 5.
+# ------------------------------------------------------------
+
+DEV_BLOCK_WIDTH = 7
+
+DEV_DATE_OFFSET = 0
+DEV_OIL_OFFSET = 2
+DEV_GAS_OFFSET = 4
+
+
+# ============================================================
+# WELL NAME NORMALIZATION
+# ============================================================
+
+# If your notebook ALREADY has normalize_well_name(),
+# you can delete this definition and use your existing one.
+
+def normalize_well_name(name):
+
+    if pd.isna(name):
+        return ""
+
+    return (
+        str(name)
+        .strip()
+        .upper()
+        .replace("-", " ")
+        .replace("_", " ")
+    )
+
+
+# ============================================================
+# ROBUST DEVELOPMENT DATE PARSER
+# ============================================================
+
+def parse_dev_dates(series):
+
+    """
+    Handles dates exported from Excel/CSV in several forms:
+
+    Jan-26
+    Feb-27
+    1/1/2026
+    2026-01-01
+    Excel serial dates such as 46023
+
+    Invalid or unreasonable dates are converted to NaT.
+    """
+
+    s = series.copy()
+
+    # Start with an empty datetime Series
+    parsed = pd.Series(
+        pd.NaT,
+        index=s.index,
+        dtype="datetime64[ns]"
+    )
+
+
+    # --------------------------------------------------------
+    # 1. TRY TEXT DATES
+    # --------------------------------------------------------
+
+    text_values = (
+        s.astype(str)
+        .str.strip()
+    )
+
+
+    # First specifically try Jan-26 / Feb-27 format
+    text_month_year = pd.to_datetime(
+        text_values,
+        format="%b-%y",
+        errors="coerce"
+    )
+
+
+    parsed.loc[
+        text_month_year.notna()
+    ] = text_month_year[
+        text_month_year.notna()
+    ]
+
+
+    # --------------------------------------------------------
+    # 2. TRY OTHER NORMAL DATE FORMATS
+    # --------------------------------------------------------
+
+    still_missing = parsed.isna()
+
+    if still_missing.any():
+
+        general_dates = pd.to_datetime(
+            text_values[still_missing],
+            errors="coerce"
+        )
+
+        parsed.loc[
+            general_dates.notna().index[
+                general_dates.notna()
+            ]
+        ] = general_dates[
+            general_dates.notna()
+        ]
+
+
+    # --------------------------------------------------------
+    # 3. TRY EXCEL SERIAL DATES
+    # --------------------------------------------------------
+
+    still_missing = parsed.isna()
+
+    if still_missing.any():
+
+        numeric_values = pd.to_numeric(
+            s[still_missing],
+            errors="coerce"
+        )
+
+        # Real Excel dates should normally be in this range.
+        # This also prevents random numbers from becoming dates.
+        excel_mask = (
+            numeric_values.notna()
+            &
+            (numeric_values >= 1)
+            &
+            (numeric_values <= 150000)
+        )
+
+        if excel_mask.any():
+
+            excel_dates = pd.to_datetime(
+                numeric_values[excel_mask],
+                unit="D",
+                origin="1899-12-30",
+                errors="coerce"
+            )
+
+            parsed.loc[
+                excel_dates.index
+            ] = excel_dates
+
+
+    # --------------------------------------------------------
+    # 4. REMOVE IMPOSSIBLE / UNWANTED YEARS
+    # --------------------------------------------------------
+
+    valid_year = (
+        parsed.notna()
+        &
+        (parsed.dt.year >= 1900)
+        &
+        (parsed.dt.year <= 2200)
+    )
+
+    parsed = parsed.where(
+        valid_year,
+        pd.NaT
+    )
+
+
+    # --------------------------------------------------------
+    # 5. NORMALIZE EVERYTHING TO MONTH START
+    # --------------------------------------------------------
+
+    parsed = (
+        parsed
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+
+    return parsed
+
+
+# ============================================================
+# LOAD CONFIRMED FUTURE DEVELOPMENT
+# ============================================================
+
+def load_confirmed_future_dev(
+    well_list_file,
+    production_file
+):
+
+    # ========================================================
+    # READ WELL -> FACILITY MAP
+    # ========================================================
+
+    dev_map_raw = pd.read_csv(
+        well_list_file
+    )
+
+
+    # Your Certain Dev Well List is:
+    #
+    # Column A = Well Name
+    # Column B = POP
+    # Column C = API10
+    # Column D = Facility
+
+    dev_map = dev_map_raw.iloc[
+        :,
+        [0, 3]
+    ].copy()
+
+
+    dev_map.columns = [
+        "Well_Name",
+        "Facility"
+    ]
+
+
+    dev_map["Well_Name"] = (
+        dev_map["Well_Name"]
+        .astype(str)
+        .str.strip()
+    )
+
+
+    dev_map["Facility"] = (
+        dev_map["Facility"]
+        .astype(str)
+        .str.strip()
+    )
+
+
+    dev_map["Match_Name"] = (
+        dev_map["Well_Name"]
+        .apply(normalize_well_name)
+    )
+
+
+    # Remove blank well names
+    dev_map = dev_map[
+        dev_map["Match_Name"] != ""
+    ].copy()
+
+
+    # One mapping per well
+    dev_map = (
+        dev_map
+        .drop_duplicates(
+            subset="Match_Name"
+        )
+        .reset_index(drop=True)
+    )
+
+
+    # ========================================================
+    # READ HORIZONTAL DEVELOPMENT PRODUCTION CSV
+    # ========================================================
+
+    raw = pd.read_csv(
+        production_file,
+        header=None
+    )
+
+
+    records = []
+
+    number_of_columns = raw.shape[1]
+
+
+    # ========================================================
+    # LOOP THROUGH EACH 7-COLUMN WELL BLOCK
+    # ========================================================
+
+    for start_col in range(
+        0,
+        number_of_columns,
+        DEV_BLOCK_WIDTH
+    ):
+
+
+        # ----------------------------------------------------
+        # WELL NAME
+        # ----------------------------------------------------
+
+        if start_col >= number_of_columns:
+            break
+
+
+        raw_well_name = raw.iloc[
+            0,
+            start_col
+        ]
+
+
+        if pd.isna(raw_well_name):
+            continue
+
+
+        well_name = str(
+            raw_well_name
+        ).strip()
+
+
+        if (
+            well_name == ""
+            or
+            well_name.lower() == "nan"
+        ):
+            continue
+
+
+        # ----------------------------------------------------
+        # MAKE SURE REQUIRED COLUMNS EXIST
+        # ----------------------------------------------------
+
+        if (
+            start_col + DEV_GAS_OFFSET
+            >= number_of_columns
+        ):
+            continue
+
+
+        # ----------------------------------------------------
+        # EXTRACT MONTHLY DATA
+        #
+        # Excel row 5 = pandas row index 4
+        # ----------------------------------------------------
+
+        date_series = raw.iloc[
+            4:,
+            start_col + DEV_DATE_OFFSET
+        ]
+
+
+        oil_series = raw.iloc[
+            4:,
+            start_col + DEV_OIL_OFFSET
+        ]
+
+
+        gas_series = raw.iloc[
+            4:,
+            start_col + DEV_GAS_OFFSET
+        ]
+
+
+        temp = pd.DataFrame({
+
+            "Well_Name":
+                well_name,
+
+            "Date":
+                date_series.values,
+
+            "Oil_BBL":
+                oil_series.values,
+
+            "Gas_MCF":
+                gas_series.values
+
+        })
+
+
+        # ====================================================
+        # FIX / PARSE DATES
+        # ====================================================
+
+        temp["Date"] = parse_dev_dates(
+            temp["Date"]
+        )
+
+
+        # Remove anything that did not parse as a valid date
+        temp = temp[
+            temp["Date"].notna()
+        ].copy()
+
+
+        if len(temp) == 0:
+
+            print(
+                f"WARNING: No valid dates found for "
+                f"{well_name}"
+            )
+
+            continue
+
+
+        # ====================================================
+        # CONVERT VOLUMES TO NUMERIC
+        # ====================================================
+
+        temp["Oil_BBL"] = pd.to_numeric(
+            temp["Oil_BBL"],
+            errors="coerce"
+        ).fillna(0)
+
+
+        temp["Gas_MCF"] = pd.to_numeric(
+            temp["Gas_MCF"],
+            errors="coerce"
+        ).fillna(0)
+
+
+        # Remove infinities if present
+        temp[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ] = (
+            temp[
+                [
+                    "Oil_BBL",
+                    "Gas_MCF"
+                ]
+            ]
+            .replace(
+                [np.inf, -np.inf],
+                0
+            )
+        )
+
+
+        # ====================================================
+        # CREATE MATCHING WELL NAME
+        # ====================================================
+
+        temp["Match_Name"] = (
+            temp["Well_Name"]
+            .apply(normalize_well_name)
+        )
+
+
+        records.append(
+            temp
+        )
+
+
+    # ========================================================
+    # MAKE SURE SOMETHING WAS FOUND
+    # ========================================================
+
+    if len(records) == 0:
+
+        raise ValueError(
+            "No valid Confirmed Future Development "
+            "well blocks were found."
+        )
+
+
+    # ========================================================
+    # COMBINE ALL DEVELOPMENT WELLS
+    # ========================================================
+
+    dev = pd.concat(
+        records,
+        ignore_index=True
+    )
+
+
+    # ========================================================
+    # ATTACH FACILITY TO EACH WELL
+    # ========================================================
+
+    dev = dev.merge(
+
+        dev_map[
+            [
+                "Match_Name",
+                "Facility"
+            ]
+        ],
+
+        on="Match_Name",
+
+        how="left"
+
+    )
+
+
+    # ========================================================
+    # QA: WELLS THAT DID NOT MATCH A FACILITY
+    # ========================================================
+
+    missing_facility = (
+
+        dev.loc[
+            dev["Facility"].isna(),
+            "Well_Name"
+        ]
+
+        .drop_duplicates()
+
+        .tolist()
+
+    )
+
+
+    if len(missing_facility) > 0:
+
+        print()
+        print(
+            "WARNING: These Confirmed Future Dev "
+            "wells did not match a facility:"
+        )
+
+        for w in missing_facility:
+
+            print(
+                "   ",
+                w
+            )
+
+        print()
+
+
+    # Only mapped wells should contribute
+    dev = dev[
+        dev["Facility"].notna()
+    ].copy()
+
+
+    # ========================================================
+    # FINAL DATE SAFETY CHECK
+    # ========================================================
+
+    dev = dev[
+        dev["Date"].notna()
+    ].copy()
+
+
+    dev = dev[
+        (dev["Date"].dt.year >= 1900)
+        &
+        (dev["Date"].dt.year <= 2200)
+    ].copy()
+
+
+    # ========================================================
+    # AGGREGATE BY FACILITY + MONTH
+    # ========================================================
+
+    dev_facility = (
+
+        dev.groupby(
+            [
+                "Facility",
+                "Date"
+            ],
+            as_index=False
+        )[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ]
+
+        .sum()
+
+        .sort_values(
+            [
+                "Facility",
+                "Date"
+            ]
+        )
+
+        .reset_index(drop=True)
+
+    )
+
+
+    # ========================================================
+    # CONVERT MONTHLY VOLUMES TO DAILY RATES
+    # ========================================================
+
+    dev_facility[
+        "Days_In_Month"
+    ] = (
+        dev_facility[
+            "Date"
+        ]
+        .dt.days_in_month
+    )
+
+
+    dev_facility[
+        "Oil_BPD"
+    ] = (
+        dev_facility[
+            "Oil_BBL"
+        ]
+        /
+        dev_facility[
+            "Days_In_Month"
+        ]
+    )
+
+
+    dev_facility[
+        "Gas_MCFD"
+    ] = (
+        dev_facility[
+            "Gas_MCF"
+        ]
+        /
+        dev_facility[
+            "Days_In_Month"
+        ]
+    )
+
+
+    return (
+        dev,
+        dev_facility,
+        dev_map
+    )
+
+
+# ============================================================
+# LOAD THE DEVELOPMENT DATA
+# ============================================================
+
+confirmed_dev_well_level, confirmed_dev_facility, confirmed_dev_map = (
+    load_confirmed_future_dev(
+
+        CONFIRMED_DEV_WELL_LIST_FILE,
+
+        CONFIRMED_DEV_PRODUCTION_FILE
+
+    )
+)
+
+
+# ============================================================
+# QA OUTPUT
+# ============================================================
+
+print()
+print(
+    "Confirmed Future Development loaded successfully."
+)
+
+print(
+    "Number of development wells:",
+    confirmed_dev_well_level[
+        "Well_Name"
+    ].nunique()
+)
+
+print(
+    "Number of facilities:",
+    confirmed_dev_facility[
+        "Facility"
+    ].nunique()
+)
+
+print(
+    "Earliest development date:",
+    confirmed_dev_well_level[
+        "Date"
+    ].min()
+)
+
+print(
+    "Latest development date:",
+    confirmed_dev_well_level[
+        "Date"
+    ].max()
+)
+
+print()
+
+print(
+    "Facilities found:"
+)
+
+for facility in sorted(
+    confirmed_dev_facility[
+        "Facility"
+    ].dropna().unique()
+):
+
+    print(
+        "   ",
+        facility
+    )
