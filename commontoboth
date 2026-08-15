@@ -1,0 +1,292 @@
+# ============================================================
+# CONFIRMED FUTURE DEVELOPMENT SETTINGS
+# ============================================================
+
+CONFIRMED_DEV_WELL_LIST_FILE = "Certain_Dev_Well_List.csv"
+CONFIRMED_DEV_PRODUCTION_FILE = "Certain_Dev_Production.csv"
+
+# Based on your spreadsheet layout:
+DEV_BLOCK_WIDTH = 7
+
+# Within each 7-column well block:
+# 0 = Date
+# 1 = Well Count
+# 2 = Oil Volume (BBL/month)
+# 3 = Oil Cumulative
+# 4 = Gas Volume (MCF/month)
+# 5 = Gas Cumulative
+# 6 = spacer / unused
+
+DEV_DATE_OFFSET = 0
+DEV_OIL_OFFSET = 2
+DEV_GAS_OFFSET = 4
+
+
+def load_confirmed_future_dev(
+    well_list_file,
+    production_file
+):
+    """
+    Reads the 'Certain Future Development' CSV exports.
+
+    Well-list CSV:
+        column 1 = Well Name
+        column 4 = Facility, based on screenshot
+
+    Production CSV:
+        repeating 7-column blocks per well
+        row 1 = merged well name in original Excel
+        rows 2-4 = labels / units
+        row 5 onward = monthly data
+    """
+
+    # --------------------------------------------------------
+    # WELL -> FACILITY MAP
+    # --------------------------------------------------------
+
+    dev_map_raw = pd.read_csv(
+        well_list_file
+    )
+
+    # Screenshot:
+    # A = Well Name
+    # B = POP
+    # C = API10
+    # D = Facility
+
+    dev_map = dev_map_raw.iloc[:, [0, 3]].copy()
+
+    dev_map.columns = [
+        "Well_Name",
+        "Facility"
+    ]
+
+    dev_map["Well_Name"] = (
+        dev_map["Well_Name"]
+        .astype(str)
+        .str.strip()
+    )
+
+    dev_map["Facility"] = (
+        dev_map["Facility"]
+        .astype(str)
+        .str.strip()
+    )
+
+    dev_map["Match_Name"] = (
+        dev_map["Well_Name"]
+        .apply(normalize_well_name)
+    )
+
+    dev_map = (
+        dev_map
+        .drop_duplicates("Match_Name")
+        .reset_index(drop=True)
+    )
+
+
+    # --------------------------------------------------------
+    # READ HORIZONTAL PRODUCTION FILE
+    # --------------------------------------------------------
+
+    raw = pd.read_csv(
+        production_file,
+        header=None
+    )
+
+    records = []
+
+    number_of_columns = raw.shape[1]
+
+    for start_col in range(
+        0,
+        number_of_columns,
+        DEV_BLOCK_WIDTH
+    ):
+
+        # Make sure enough columns remain
+        if start_col >= number_of_columns:
+            break
+
+        raw_well_name = raw.iloc[
+            0,
+            start_col
+        ]
+
+        if pd.isna(raw_well_name):
+            continue
+
+        well_name = str(
+            raw_well_name
+        ).strip()
+
+        if (
+            well_name == ""
+            or well_name.lower() == "nan"
+        ):
+            continue
+
+        # Pull monthly columns.
+        # Data starts on Excel row 5,
+        # which is pandas row index 4.
+        date_series = raw.iloc[
+            4:,
+            start_col + DEV_DATE_OFFSET
+        ]
+
+        oil_series = raw.iloc[
+            4:,
+            start_col + DEV_OIL_OFFSET
+        ]
+
+        gas_series = raw.iloc[
+            4:,
+            start_col + DEV_GAS_OFFSET
+        ]
+
+        temp = pd.DataFrame({
+            "Well_Name": well_name,
+            "Date": date_series.values,
+            "Oil_BBL": oil_series.values,
+            "Gas_MCF": gas_series.values
+        })
+
+        temp["Date"] = pd.to_datetime(
+            temp["Date"],
+            errors="coerce"
+        )
+
+        temp["Date"] = (
+            temp["Date"]
+            .dt.to_period("M")
+            .dt.to_timestamp()
+        )
+
+        temp["Oil_BBL"] = pd.to_numeric(
+            temp["Oil_BBL"],
+            errors="coerce"
+        ).fillna(0)
+
+        temp["Gas_MCF"] = pd.to_numeric(
+            temp["Gas_MCF"],
+            errors="coerce"
+        ).fillna(0)
+
+        temp["Match_Name"] = (
+            temp["Well_Name"]
+            .apply(normalize_well_name)
+        )
+
+        temp = temp[
+            temp["Date"].notna()
+        ]
+
+        records.append(temp)
+
+
+    if len(records) == 0:
+
+        raise ValueError(
+            "No Confirmed Future Development "
+            "well blocks were found."
+        )
+
+
+    dev = pd.concat(
+        records,
+        ignore_index=True
+    )
+
+
+    # --------------------------------------------------------
+    # ATTACH FACILITY
+    # --------------------------------------------------------
+
+    dev = dev.merge(
+        dev_map[
+            [
+                "Match_Name",
+                "Facility"
+            ]
+        ],
+        on="Match_Name",
+        how="left"
+    )
+
+
+    # QA wells with no facility mapping
+    missing_facility = (
+        dev.loc[
+            dev["Facility"].isna(),
+            "Well_Name"
+        ]
+        .drop_duplicates()
+        .tolist()
+    )
+
+    if len(missing_facility) > 0:
+
+        print(
+            "WARNING: Confirmed Future Dev "
+            "wells missing a facility:"
+        )
+
+        for w in missing_facility:
+            print("   ", w)
+
+
+    # Only mapped wells contribute
+    dev = dev[
+        dev["Facility"].notna()
+    ].copy()
+
+
+    # --------------------------------------------------------
+    # AGGREGATE BY FACILITY + MONTH
+    # --------------------------------------------------------
+
+    dev_facility = (
+        dev.groupby(
+            [
+                "Facility",
+                "Date"
+            ],
+            as_index=False
+        )[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ]
+        .sum()
+        .sort_values(
+            [
+                "Facility",
+                "Date"
+            ]
+        )
+    )
+
+
+    dev_facility["Days_In_Month"] = (
+        dev_facility["Date"]
+        .dt.days_in_month
+    )
+
+    dev_facility["Oil_BPD"] = (
+        dev_facility["Oil_BBL"]
+        /
+        dev_facility["Days_In_Month"]
+    )
+
+    dev_facility["Gas_MCFD"] = (
+        dev_facility["Gas_MCF"]
+        /
+        dev_facility["Days_In_Month"]
+    )
+
+    return (
+        dev,
+        dev_facility,
+        dev_map
+    )
