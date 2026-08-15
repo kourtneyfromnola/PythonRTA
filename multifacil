@@ -1,0 +1,450 @@
+# ============================================================
+# ADD CONFIRMED FUTURE DEV TO MODIFIED PROFILE
+# MULTI-FACILITY VERSION
+# ============================================================
+
+modified_plus_dev = pd.merge(
+    modified_facility[
+        [
+            "Facility",
+            "Date",
+            "Oil_BBL",
+            "Gas_MCF",
+            "Oil_BPD",
+            "Gas_MCFD"
+        ]
+    ],
+    confirmed_dev_facility[
+        [
+            "Facility",
+            "Date",
+            "Oil_BBL",
+            "Gas_MCF",
+            "Oil_BPD",
+            "Gas_MCFD"
+        ]
+    ],
+    on=[
+        "Facility",
+        "Date"
+    ],
+    how="outer",
+    suffixes=(
+        "_Modified",
+        "_Dev"
+    )
+)
+
+modified_plus_dev = (
+    modified_plus_dev
+    .sort_values(
+        [
+            "Facility",
+            "Date"
+        ]
+    )
+    .reset_index(drop=True)
+)
+
+
+# Fill months where one stream has no volume
+value_cols = [
+    "Oil_BBL_Modified",
+    "Gas_MCF_Modified",
+    "Oil_BPD_Modified",
+    "Gas_MCFD_Modified",
+    "Oil_BBL_Dev",
+    "Gas_MCF_Dev",
+    "Oil_BPD_Dev",
+    "Gas_MCFD_Dev"
+]
+
+modified_plus_dev[
+    value_cols
+] = modified_plus_dev[
+    value_cols
+].fillna(0)
+
+
+# Combined monthly volumes
+modified_plus_dev[
+    "Oil_BBL_Combined"
+] = (
+    modified_plus_dev[
+        "Oil_BBL_Modified"
+    ]
+    +
+    modified_plus_dev[
+        "Oil_BBL_Dev"
+    ]
+)
+
+modified_plus_dev[
+    "Gas_MCF_Combined"
+] = (
+    modified_plus_dev[
+        "Gas_MCF_Modified"
+    ]
+    +
+    modified_plus_dev[
+        "Gas_MCF_Dev"
+    ]
+)
+
+
+# Combined daily rates
+modified_plus_dev[
+    "Oil_BPD_Combined"
+] = (
+    modified_plus_dev[
+        "Oil_BPD_Modified"
+    ]
+    +
+    modified_plus_dev[
+        "Oil_BPD_Dev"
+    ]
+)
+
+modified_plus_dev[
+    "Gas_MCFD_Combined"
+] = (
+    modified_plus_dev[
+        "Gas_MCFD_Modified"
+    ]
+    +
+    modified_plus_dev[
+        "Gas_MCFD_Dev"
+    ]
+)
+
+
+# Cumulative Modified volumes
+modified_plus_dev[
+    "Cum_Oil_Modified"
+] = (
+    modified_plus_dev
+    .groupby("Facility")[
+        "Oil_BBL_Modified"
+    ]
+    .cumsum()
+)
+
+modified_plus_dev[
+    "Cum_Gas_Modified"
+] = (
+    modified_plus_dev
+    .groupby("Facility")[
+        "Gas_MCF_Modified"
+    ]
+    .cumsum()
+)
+
+
+# Cumulative Combined volumes
+modified_plus_dev[
+    "Cum_Oil_Combined"
+] = (
+    modified_plus_dev
+    .groupby("Facility")[
+        "Oil_BBL_Combined"
+    ]
+    .cumsum()
+)
+
+modified_plus_dev[
+    "Cum_Gas_Combined"
+] = (
+    modified_plus_dev
+    .groupby("Facility")[
+        "Gas_MCF_Combined"
+    ]
+    .cumsum()
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def plot_modified_plus_confirmed_dev(
+    df,
+    facility,
+    stream="Oil"
+):
+
+    d = (
+        df[
+            df["Facility"] == facility
+        ]
+        .copy()
+        .sort_values("Date")
+    )
+
+    if len(d) == 0:
+        return
+
+
+    if stream == "Oil":
+
+        modified_rate = (
+            "Oil_BPD_Modified"
+        )
+
+        dev_rate = (
+            "Oil_BPD_Dev"
+        )
+
+        combined_rate = (
+            "Oil_BPD_Combined"
+        )
+
+        modified_cum = (
+            "Cum_Oil_Modified"
+        )
+
+        combined_cum = (
+            "Cum_Oil_Combined"
+        )
+
+        rate_units = "BPD"
+        cumulative_units = "BBL"
+
+    else:
+
+        modified_rate = (
+            "Gas_MCFD_Modified"
+        )
+
+        dev_rate = (
+            "Gas_MCFD_Dev"
+        )
+
+        combined_rate = (
+            "Gas_MCFD_Combined"
+        )
+
+        modified_cum = (
+            "Cum_Gas_Modified"
+        )
+
+        combined_cum = (
+            "Cum_Gas_Combined"
+        )
+
+        rate_units = "MCF/D"
+        cumulative_units = "MCF"
+
+
+    peak_modified = (
+        d[modified_rate].max()
+    )
+
+    peak_combined = (
+        d[combined_rate].max()
+    )
+
+    incremental_cum = (
+        d[combined_cum].iloc[-1]
+        -
+        d[modified_cum].iloc[-1]
+    )
+
+
+    fig, ax_rate = plt.subplots(
+        figsize=(14, 7)
+    )
+
+    ax_cum = ax_rate.twinx()
+
+
+    # --------------------------------------------------------
+    # RATE
+    # --------------------------------------------------------
+
+    mod_line, = ax_rate.plot(
+        d["Date"],
+        d[modified_rate],
+        linewidth=2,
+        label="Modified Profile"
+    )
+
+
+    combined_line, = ax_rate.plot(
+        d["Date"],
+        d[combined_rate],
+        linewidth=2,
+        label="Modified + Confirmed Future Dev"
+    )
+
+
+    # Green incremental development stream
+    ax_rate.fill_between(
+        d["Date"],
+        d[modified_rate],
+        d[combined_rate],
+        color="green",
+        alpha=0.30,
+        label="Confirmed Future Dev"
+    )
+
+
+    # --------------------------------------------------------
+    # CUMULATIVE
+    # --------------------------------------------------------
+
+    mod_cum_line, = ax_cum.plot(
+        d["Date"],
+        d[modified_cum],
+        linestyle="--",
+        linewidth=2,
+        label="Modified Cumulative"
+    )
+
+
+    combined_cum_line, = ax_cum.plot(
+        d["Date"],
+        d[combined_cum],
+        linestyle="--",
+        linewidth=2,
+        label=(
+            "Modified + Confirmed "
+            "Future Dev Cumulative"
+        )
+    )
+
+
+    # Green cumulative incremental volume
+    ax_cum.fill_between(
+        d["Date"],
+        d[modified_cum],
+        d[combined_cum],
+        color="green",
+        alpha=0.10
+    )
+
+
+    # --------------------------------------------------------
+    # PEAK-RATE NOTE
+    # --------------------------------------------------------
+
+    note = (
+        f"Peak Modified: "
+        f"{peak_modified:,.0f} "
+        f"{rate_units}\n"
+
+        f"Peak w/ Confirmed Dev: "
+        f"{peak_combined:,.0f} "
+        f"{rate_units}\n"
+
+        f"Confirmed Dev Increment: "
+        f"{incremental_cum:,.0f} "
+        f"{cumulative_units}"
+    )
+
+
+    ax_rate.text(
+        0.015,
+        0.97,
+        note,
+        transform=ax_rate.transAxes,
+        va="top",
+        ha="left",
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            alpha=0.88
+        )
+    )
+
+
+    ax_rate.set_title(
+        f"{facility} - {stream}: "
+        f"Modified + Confirmed Future Dev"
+    )
+
+    ax_rate.set_xlabel(
+        "Date"
+    )
+
+    ax_rate.set_ylabel(
+        f"{stream} Rate "
+        f"({rate_units})"
+    )
+
+    ax_cum.set_ylabel(
+        f"Cumulative {stream} "
+        f"({cumulative_units})"
+    )
+
+    ax_rate.grid(
+        True,
+        alpha=0.3
+    )
+
+
+    # Combined legend
+    handles = [
+        mod_line,
+        combined_line,
+        mod_cum_line,
+        combined_cum_line
+    ]
+
+    labels = [
+        "Modified Profile",
+        "Modified + Confirmed Future Dev",
+        "Modified Cumulative",
+        "Modified + Confirmed Future Dev Cumulative"
+    ]
+
+    ax_rate.legend(
+        handles,
+        labels,
+        loc="upper right"
+    )
+
+
+    fig.tight_layout()
+
+    plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+for facility in sorted(
+    modified_plus_dev[
+        "Facility"
+    ].dropna().unique()
+):
+
+    plot_modified_plus_confirmed_dev(
+        modified_plus_dev,
+        facility,
+        stream="Oil"
+    )
+
+    plot_modified_plus_confirmed_dev(
+        modified_plus_dev,
+        facility,
+        stream="Gas"
+    )
