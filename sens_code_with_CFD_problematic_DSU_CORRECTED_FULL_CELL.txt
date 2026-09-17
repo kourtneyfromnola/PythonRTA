@@ -1,0 +1,2281 @@
+# skipping this for now 20260913 cmg
+
+# =====================================================================
+# PDP + CFD RETURN-TO-PRODUCTION (RTP) SENSITIVITY
+#
+# HIGH / ON
+# ---------------------------------------------------------------------
+# Normal PDP:
+#     Actual production through last actual month
+#     -> massive PDP forecast thereafter
+#
+# Sensitivity Wells:
+#     Actual production through last actual month
+#     -> massive PDP forecast thereafter
+#
+# Problematic DSUs:
+#     COMPLETELY REPLACE BOTH ORIGINAL PRODUCTION AND FORECAST
+#     with the alternative type curve.
+#
+#     TC Forecast Month 1 is placed at the well's FIRST ORIGINAL
+#     PRODUCTION MONTH.
+#
+#     If the well has no actual production, Forecast Month 1 is
+#     placed at the first available massive PDP forecast month.
+#
+#
+# LOW / OFF
+# ---------------------------------------------------------------------
+# Normal PDP:
+#     Actual -> massive PDP forecast
+#
+# Sensitivity Wells:
+#     Actual -> ZERO after last actual
+#
+# Problematic DSUs:
+#     Actual -> massive PDP forecast
+#
+#
+# CASES
+# ---------------------------------------------------------------------
+# 01 = PDP
+# 02 = PDP + CFD
+# 03 = PDP + CFD + UFD
+#
+#
+# HERCULES SPECIAL HANDLING
+# ---------------------------------------------------------------------
+# OIL:
+#   HERCULES CPF
+#   HERCULES EAST SATELLITE
+#   HERCULES WEST SATELLITE
+#
+#       -> combined into one "HERCULES" oil facility
+#
+# GAS:
+#   HERCULES CPF
+#   HERCULES EAST SATELLITE
+#   HERCULES WEST SATELLITE
+#
+#       -> remain three separate gas facilities
+#
+#
+# CURRENT-RATE REPORTING
+# ---------------------------------------------------------------------
+# Forecast_Dependent_Current_Rate
+#     = 8/1/2026 modeled/stiched profile
+#
+# Recorded_PDP_Rate_7_15_2026
+#     = actual recorded July PDP production
+#     = directly from the PDP production source
+#
+# NOTE:
+# The July recorded-production metric remains the REAL recorded value
+# even for Problematic DSUs. It is a reference metric, not the modeled
+# HIGH case.
+#
+#
+# SUMMARY
+# ---------------------------------------------------------------------
+# Includes:
+#   - recorded PDP actual rate (July 2026)
+#   - forecast-dependent current rate (August 2026)
+#   - 2/1/2034 rate
+#   - peak rate on/after 2/1/2034 + peak date
+#   - ending cumulative
+#   - HIGH minus LOW deltas
+#   - Case 03 facility rankings
+#
+# Rank 1 = highest rate
+# =====================================================================
+import pandas as pd
+import numpy as np
+import re
+# =====================================================================
+# FILES / SETTINGS
+# =====================================================================
+SENSITIVITY_WELLS_FILE = "Sensitivity Wells.csv"
+PROBLEMATIC_DSUS_FILE = "Problematic DSUs.csv"
+# Change only this filename if your TC CSV has a different name.
+PROBLEMATIC_DSU_TC_FILE = "MONTHLY FRCST CMG SENS 6 COL.csv"
+# Existing "current" modeled-rate convention
+FORECAST_CURRENT_DATE = pd.Timestamp("2026-08-01")
+# Actual recorded-production reference
+RECORDED_PRODUCTION_DATE = pd.Timestamp("2026-07-01")
+# Future reporting date
+TARGET_2034_DATE = pd.Timestamp("2034-02-01")
+SUMMARY_FILE = (
+    "PDP_RTP_Sensitivity_Facility_Summary.csv"
+)
+# =====================================================================
+# FACILITY NORMALIZATION
+# =====================================================================
+def rtp_normalize_facility(v):
+    if pd.isna(v):
+        return ""
+    return re.sub(
+        r"\s+",
+        " ",
+        str(v).strip()
+    ).upper()
+# =====================================================================
+# HERCULES FACILITY HANDLING
+# =====================================================================
+HERCULES_NAMES = {
+    "HERCULES CPF",
+    "HERCULES EAST SATELLITE",
+    "HERCULES WEST SATELLITE"
+}
+def oil_facility_map(v):
+    f = rtp_normalize_facility(v)
+    if f in HERCULES_NAMES:
+        return "HERCULES"
+    return f
+def gas_facility_map(v):
+    # Gas intentionally retains the satellite distinction.
+    return rtp_normalize_facility(v)
+# =====================================================================
+# READ SIMPLE COLUMN-A WELL LISTS
+# =====================================================================
+def read_simple_well_list(filename):
+    d = pd.read_csv(
+        filename,
+        usecols=[0]
+    )
+    d.columns = ["Well_Name"]
+    d["Match_Name"] = (
+        d["Well_Name"]
+        .apply(normalize_name)
+    )
+    return set(
+        d.loc[
+            d["Match_Name"] != "",
+            "Match_Name"
+        ]
+    )
+SENSITIVITY_WELLS = read_simple_well_list(
+    SENSITIVITY_WELLS_FILE
+)
+PROBLEMATIC_DSUS = read_simple_well_list(
+    PROBLEMATIC_DSUS_FILE
+)
+print(
+    "Sensitivity Wells:",
+    len(SENSITIVITY_WELLS)
+)
+print(
+    "Problematic DSUs:",
+    len(PROBLEMATIC_DSUS)
+)
+# =====================================================================
+# DO NOT ALLOW A WELL IN BOTH LISTS
+# =====================================================================
+LIST_OVERLAP = (
+    SENSITIVITY_WELLS
+    &
+    PROBLEMATIC_DSUS
+)
+if len(LIST_OVERLAP) > 0:
+    print()
+    print(
+        "ERROR: These wells occur in BOTH "
+        "Sensitivity Wells and Problematic DSUs:"
+    )
+    for w in sorted(LIST_OVERLAP):
+        print(w)
+    raise ValueError(
+        "Remove overlapping wells from one of the two lists."
+    )
+# =====================================================================
+# PREP PDP ROUTING
+# =====================================================================
+pdp_route_rtp = pdp_route.copy()
+pdp_route_rtp["Facility"] = (
+    pdp_route_rtp["Facility"]
+    .apply(rtp_normalize_facility)
+)
+pdp_route_rtp["Match_Name"] = (
+    pdp_route_rtp["Match_Name"]
+    .apply(normalize_name)
+)
+pdp_route_rtp["WI"] = pd.to_numeric(
+    pdp_route_rtp["WI"],
+    errors="coerce"
+)
+if pdp_route_rtp["WI"].isna().any():
+    raise ValueError(
+        "PDP routing contains blank/non-numeric WI."
+    )
+# Protect against WI being stored as 0-100 rather than decimal.
+if (
+    len(pdp_route_rtp) > 0
+    and
+    pdp_route_rtp["WI"].max() > 1.0
+):
+    pdp_route_rtp["WI"] = (
+        pdp_route_rtp["WI"]
+        /
+        100.0
+    )
+PDP_ALLOWED_RTP = set(
+    pdp_route_rtp["Match_Name"]
+)
+
+# =====================================================================
+# PREP CFD ROUTING FOR PROBLEMATIC-DSU SENSITIVITY
+# =====================================================================
+cfd_route_rtp = cfd_route.copy()
+cfd_route_rtp["Facility"] = cfd_route_rtp["Facility"].apply(rtp_normalize_facility)
+cfd_route_rtp["Match_Name"] = cfd_route_rtp["Match_Name"].apply(normalize_name)
+cfd_route_rtp["WI"] = pd.to_numeric(cfd_route_rtp["WI"], errors="coerce")
+if cfd_route_rtp["WI"].isna().any():
+    raise ValueError("CFD routing contains blank/non-numeric WI.")
+if len(cfd_route_rtp) > 0 and cfd_route_rtp["WI"].max() > 1.0:
+    cfd_route_rtp["WI"] = cfd_route_rtp["WI"] / 100.0
+
+CFD_ALLOWED_RTP = set(cfd_route_rtp["Match_Name"])
+PROBLEMATIC_PDP = PROBLEMATIC_DSUS & PDP_ALLOWED_RTP
+PROBLEMATIC_CFD = PROBLEMATIC_DSUS & CFD_ALLOWED_RTP
+
+both_components = PROBLEMATIC_PDP & PROBLEMATIC_CFD
+if both_components:
+    raise ValueError(
+        "Problematic DSUs occur in BOTH PDP and CFD routing: "
+        + ", ".join(sorted(both_components))
+    )
+
+missing_problematic_all = PROBLEMATIC_DSUS - (PDP_ALLOWED_RTP | CFD_ALLOWED_RTP)
+if missing_problematic_all:
+    raise ValueError(
+        "Problematic DSUs found in neither PDP nor CFD routing: "
+        + ", ".join(sorted(missing_problematic_all))
+    )
+
+print("Problematic PDP wells:", len(PROBLEMATIC_PDP))
+print("Problematic CFD wells:", len(PROBLEMATIC_CFD))
+# =====================================================================
+# CHECK LISTED WELLS AGAINST PDP ROUTING
+# =====================================================================
+missing_sensitivity = sorted(
+    SENSITIVITY_WELLS
+    -
+    PDP_ALLOWED_RTP
+)
+missing_problematic = sorted(
+    PROBLEMATIC_PDP
+    -
+    PDP_ALLOWED_RTP
+)
+if len(missing_sensitivity) > 0:
+    print()
+    print(
+        "WARNING - Sensitivity Wells not found in PDP routing:"
+    )
+    for w in missing_sensitivity:
+        print(w)
+if len(missing_problematic) > 0:
+    print()
+    print(
+        "WARNING - Problematic DSUs not found in PDP routing:"
+    )
+    for w in missing_problematic:
+        print(w)
+# =====================================================================
+# READ MASSIVE PDP PRODUCTION / FORECAST FILE
+# =====================================================================
+def read_large_pdp_rtp(filename):
+    keep = []
+    for chunk in pd.read_csv(
+        filename,
+        usecols=[0, 7, 8, 9],
+        chunksize=CHUNK_SIZE
+    ):
+        chunk.columns = [
+            "Well_Name",
+            "Date",
+            "Oil_BBL",
+            "Gas_MCF"
+        ]
+        chunk["Match_Name"] = (
+            chunk["Well_Name"]
+            .apply(normalize_name)
+        )
+        chunk = chunk[
+            chunk["Match_Name"].isin(
+                PDP_ALLOWED_RTP
+            )
+        ].copy()
+        if len(chunk) == 0:
+            continue
+        # Normalize 7/15/26 -> 7/1/26, 8/15/26 -> 8/1/26, etc.
+        chunk["Date"] = (
+            pd.to_datetime(
+                chunk["Date"],
+                errors="coerce"
+            )
+            .dt.to_period("M")
+            .dt.to_timestamp()
+        )
+        chunk["Oil_BBL"] = pd.to_numeric(
+            chunk["Oil_BBL"],
+            errors="coerce"
+        ).fillna(0.0)
+        chunk["Gas_MCF"] = pd.to_numeric(
+            chunk["Gas_MCF"],
+            errors="coerce"
+        ).fillna(0.0)
+        chunk = chunk[
+            chunk["Date"].notna()
+        ].copy()
+        keep.append(
+            chunk.groupby(
+                [
+                    "Match_Name",
+                    "Date"
+                ],
+                as_index=False
+            )[
+                [
+                    "Oil_BBL",
+                    "Gas_MCF"
+                ]
+            ].sum()
+        )
+    if len(keep) == 0:
+        return pd.DataFrame(
+            columns=[
+                "Match_Name",
+                "Date",
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        )
+    d = pd.concat(
+        keep,
+        ignore_index=True
+    )
+    return (
+        d.groupby(
+            [
+                "Match_Name",
+                "Date"
+            ],
+            as_index=False
+        )[
+            [
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ]
+        .sum()
+    )
+print()
+print("Reading PDP actual production...")
+pdp_actual_rtp = read_large_pdp_rtp(
+    PDP_PRODUCTION_FILE
+)
+print("Reading massive PDP forecast...")
+pdp_forecast_rtp = read_large_pdp_rtp(
+    PDP_FORECAST_FILE
+)
+# =====================================================================
+# READ PROBLEMATIC DSU TYPE-CURVE FILE
+#
+# Expected file format:
+#
+# A = ENTITY_NAME
+# B = FORECAST MONTHS
+# C = OIL VOLUME
+# D = OIL RATE
+# E = RAW GAS VOLUME
+# F = RAW GAS RATE
+#
+# We use:
+#   A = well
+#   B = forecast month
+#   C = monthly oil volume
+#   E = monthly gas volume
+#
+# Rate columns are NOT used because rate is recalculated from
+# monthly volume / calendar days.
+# =====================================================================
+problem_tc = pd.read_csv(
+    PROBLEMATIC_DSU_TC_FILE,
+    usecols=[0, 1, 2, 4]
+)
+problem_tc.columns = [
+    "Well_Name",
+    "Forecast_Month",
+    "Oil_BBL",
+    "Gas_MCF"
+]
+problem_tc["Match_Name"] = (
+    problem_tc["Well_Name"]
+    .apply(normalize_name)
+)
+problem_tc["Forecast_Month"] = pd.to_numeric(
+    problem_tc["Forecast_Month"],
+    errors="coerce"
+)
+problem_tc["Oil_BBL"] = pd.to_numeric(
+    problem_tc["Oil_BBL"],
+    errors="coerce"
+).fillna(0.0)
+problem_tc["Gas_MCF"] = pd.to_numeric(
+    problem_tc["Gas_MCF"],
+    errors="coerce"
+).fillna(0.0)
+problem_tc = problem_tc[
+    problem_tc["Forecast_Month"].notna()
+].copy()
+problem_tc["Forecast_Month"] = (
+    problem_tc["Forecast_Month"]
+    .astype(int)
+)
+problem_tc = problem_tc[
+    problem_tc["Match_Name"].isin(
+        PROBLEMATIC_DSUS
+    )
+].copy()
+# =====================================================================
+# CHECK TYPE-CURVE COVERAGE
+# =====================================================================
+tc_names = set(
+    problem_tc["Match_Name"]
+)
+missing_tc = sorted(
+    PROBLEMATIC_DSUS
+    -
+    tc_names
+)
+if len(missing_tc) > 0:
+    print()
+    print(
+        "ERROR - Problematic DSUs missing from "
+        "Problematic DSU Type Curve file:"
+    )
+    for w in missing_tc:
+        print(w)
+    raise ValueError(
+        "Every Problematic DSU must have a type curve."
+    )
+print()
+print(
+    "Problematic DSUs with alternative type curves:",
+    len(tc_names)
+)
+# =====================================================================
+# GET FIRST ORIGINAL ONLINE MONTH FOR A PROBLEMATIC DSU
+#
+# HIGH case TC Forecast Month 1 begins here.
+#
+# Priority:
+#   1. first actual production month
+#   2. if no actual exists, first massive PDP forecast month
+#
+# This is intentionally NOT the month after last actual.
+#
+# Because HIGH completely replaces BOTH actual production AND forecast.
+# =====================================================================
+def get_problematic_tc_start(
+    well,
+    p,
+    f
+):
+    if len(p) > 0:
+        return p[
+            "Date"
+        ].min()
+    if len(f) > 0:
+        return f[
+            "Date"
+        ].min()
+    raise ValueError(
+        f"{well}: no production or forecast date exists "
+        "to anchor the Problematic DSU type curve."
+    )
+# =====================================================================
+# CREATE DATE-ALIGNED PROBLEMATIC DSU TYPE CURVE
+#
+# Example:
+#
+# Original first production = 4/15/2026
+# Normalized month          = 4/1/2026
+#
+# TC Forecast Month 1       = 4/1/2026
+# TC Forecast Month 2       = 5/1/2026
+# etc.
+# =====================================================================
+def get_problematic_tc_profile(
+    well,
+    tc_start
+):
+    tc = problem_tc[
+        problem_tc["Match_Name"]
+        ==
+        well
+    ].copy()
+    if len(tc) == 0:
+        raise ValueError(
+            f"{well}: no Problematic DSU type curve found."
+        )
+    tc = tc.sort_values(
+        "Forecast_Month"
+    ).copy()
+    tc["Date"] = [
+        pd.Timestamp(tc_start)
+        +
+        pd.DateOffset(
+            months=int(m) - 1
+        )
+        for m in tc[
+            "Forecast_Month"
+        ]
+    ]
+    tc = tc.rename(
+        columns={
+            "Oil_BBL":
+                "TC_Oil_BBL",
+            "Gas_MCF":
+                "TC_Gas_MCF"
+        }
+    )
+    return tc[
+        [
+            "Date",
+            "TC_Oil_BBL",
+            "TC_Gas_MCF"
+        ]
+    ]
+# =====================================================================
+# BUILD HIGH / LOW PDP WELL PROFILES
+# =====================================================================
+def build_rtp_pdp_profiles(
+    scenario
+):
+    if scenario not in [
+        "HIGH_ON",
+        "LOW_OFF"
+    ]:
+        raise ValueError(
+            "scenario must be HIGH_ON or LOW_OFF"
+        )
+    pieces = []
+    for _, route in pdp_route_rtp.iterrows():
+        well = route[
+            "Match_Name"
+        ]
+        facility = route[
+            "Facility"
+        ]
+        wi = float(
+            route["WI"]
+        )
+        # -------------------------------------------------------------
+        # RAW ORIGINAL ACTUAL PRODUCTION
+        # -------------------------------------------------------------
+        p = pdp_actual_rtp[
+            pdp_actual_rtp[
+                "Match_Name"
+            ]
+            ==
+            well
+        ].copy()
+        # -------------------------------------------------------------
+        # RAW ORIGINAL MASSIVE PDP FORECAST
+        # -------------------------------------------------------------
+        f = pdp_forecast_rtp[
+            pdp_forecast_rtp[
+                "Match_Name"
+            ]
+            ==
+            well
+        ].copy()
+        # =============================================================
+        # PROBLEMATIC DSU + HIGH / ON
+        #
+        # COMPLETELY IGNORE BOTH p AND f FOR VOLUME.
+        #
+        # They are used ONLY to determine the original first online
+        # month to which TC Forecast Month 1 is anchored.
+        # =============================================================
+        if (
+            well in PROBLEMATIC_PDP
+            and
+            scenario == "HIGH_ON"
+        ):
+            tc_start = get_problematic_tc_start(
+                well,
+                p,
+                f
+            )
+            tc = get_problematic_tc_profile(
+                well,
+                tc_start
+            )
+            # Restrict to requested maximum well life.
+            tc = (
+                tc.sort_values(
+                    "Date"
+                )
+                .head(
+                    MAX_WELL_MONTHS
+                )
+                .copy()
+            )
+            high_problem = pd.DataFrame(
+                {
+                    "Facility":
+                        facility,
+                    "Match_Name":
+                        well,
+                    "Date":
+                        tc["Date"],
+                    # TC completely replaces actual + PDP forecast.
+                    "Net_Oil_BBL":
+                        tc[
+                            "TC_Oil_BBL"
+                        ].to_numpy(dtype=float)
+                        *
+                        wi,
+                    "Net_Gas_MCF":
+                        tc[
+                            "TC_Gas_MCF"
+                        ].to_numpy(dtype=float)
+                        *
+                        wi
+                }
+            )
+            pieces.append(
+                high_problem
+            )
+            # Critical:
+            # do NOT run normal PDP stitching for this well.
+            continue
+        # =============================================================
+        # ALL OTHER SITUATIONS
+        #
+        # This includes:
+        #
+        # LOW/OFF Problematic DSU
+        # HIGH/ON Sensitivity Well
+        # LOW/OFF Sensitivity Well
+        # Normal PDP in either scenario
+        # =============================================================
+        # -------------------------------------------------------------
+        # PROFILE START
+        # -------------------------------------------------------------
+        if len(p) > 0:
+            start = p[
+                "Date"
+            ].min()
+        elif len(f) > 0:
+            start = f[
+                "Date"
+            ].min()
+        else:
+            continue
+        calendar = pd.DataFrame(
+            {
+                "Date":
+                    pd.date_range(
+                        start=start,
+                        periods=MAX_WELL_MONTHS,
+                        freq="MS"
+                    )
+            }
+        )
+        # -------------------------------------------------------------
+        # ORIGINAL ACTUAL PRODUCTION
+        # -------------------------------------------------------------
+        actual = p[
+            [
+                "Date",
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ].rename(
+            columns={
+                "Oil_BBL":
+                    "Actual_Oil_BBL",
+                "Gas_MCF":
+                    "Actual_Gas_MCF"
+            }
+        )
+        calendar = calendar.merge(
+            actual,
+            on="Date",
+            how="left"
+        )
+        # -------------------------------------------------------------
+        # ORIGINAL MASSIVE PDP FORECAST
+        # -------------------------------------------------------------
+        forecast = f[
+            [
+                "Date",
+                "Oil_BBL",
+                "Gas_MCF"
+            ]
+        ].rename(
+            columns={
+                "Oil_BBL":
+                    "Forecast_Oil_BBL",
+                "Gas_MCF":
+                    "Forecast_Gas_MCF"
+            }
+        )
+        calendar = calendar.merge(
+            forecast,
+            on="Date",
+            how="left"
+        )
+        for col in [
+            "Actual_Oil_BBL",
+            "Actual_Gas_MCF",
+            "Forecast_Oil_BBL",
+            "Forecast_Gas_MCF"
+        ]:
+            if col not in calendar.columns:
+                calendar[col] = 0.0
+            calendar[col] = (
+                pd.to_numeric(
+                    calendar[col],
+                    errors="coerce"
+                )
+                .fillna(0.0)
+            )
+        # -------------------------------------------------------------
+        # LAST ACTUAL PRODUCTION
+        # -------------------------------------------------------------
+        if len(p) > 0:
+            last_actual = (
+                p["Date"].max()
+            )
+            actual_mask = (
+                calendar["Date"]
+                <=
+                last_actual
+            )
+        else:
+            last_actual = pd.NaT
+            actual_mask = pd.Series(
+                False,
+                index=calendar.index
+            )
+        future_mask = (
+            ~actual_mask
+        )
+        # -------------------------------------------------------------
+        # START PROFILE AT ZERO
+        # -------------------------------------------------------------
+        calendar[
+            "Gross_Oil_BBL"
+        ] = 0.0
+        calendar[
+            "Gross_Gas_MCF"
+        ] = 0.0
+        # -------------------------------------------------------------
+        # ORIGINAL ACTUAL PRODUCTION
+        # -------------------------------------------------------------
+        calendar.loc[
+            actual_mask,
+            "Gross_Oil_BBL"
+        ] = calendar.loc[
+            actual_mask,
+            "Actual_Oil_BBL"
+        ]
+        calendar.loc[
+            actual_mask,
+            "Gross_Gas_MCF"
+        ] = calendar.loc[
+            actual_mask,
+            "Actual_Gas_MCF"
+        ]
+        # =============================================================
+        # FUTURE FORECAST LOGIC
+        # =============================================================
+        # -------------------------------------------------------------
+        # SENSITIVITY WELL
+        # -------------------------------------------------------------
+        if well in SENSITIVITY_WELLS:
+            if scenario == "HIGH_ON":
+                # HIGH / ON:
+                # retain massive PDP forecast
+                calendar.loc[
+                    future_mask,
+                    "Gross_Oil_BBL"
+                ] = calendar.loc[
+                    future_mask,
+                    "Forecast_Oil_BBL"
+                ]
+                calendar.loc[
+                    future_mask,
+                    "Gross_Gas_MCF"
+                ] = calendar.loc[
+                    future_mask,
+                    "Forecast_Gas_MCF"
+                ]
+            else:
+                # LOW / OFF:
+                # ALL forecast after last actual remains ZERO.
+                pass
+        # -------------------------------------------------------------
+        # PROBLEMATIC DSU IN LOW / OFF
+        # -------------------------------------------------------------
+        elif well in PROBLEMATIC_PDP:
+            # HIGH already exited above.
+            #
+            # Therefore this section is LOW / OFF only:
+            # actual production + massive PDP forecast.
+            calendar.loc[
+                future_mask,
+                "Gross_Oil_BBL"
+            ] = calendar.loc[
+                future_mask,
+                "Forecast_Oil_BBL"
+            ]
+            calendar.loc[
+                future_mask,
+                "Gross_Gas_MCF"
+            ] = calendar.loc[
+                future_mask,
+                "Forecast_Gas_MCF"
+            ]
+        # -------------------------------------------------------------
+        # NORMAL PDP
+        # -------------------------------------------------------------
+        else:
+            calendar.loc[
+                future_mask,
+                "Gross_Oil_BBL"
+            ] = calendar.loc[
+                future_mask,
+                "Forecast_Oil_BBL"
+            ]
+            calendar.loc[
+                future_mask,
+                "Gross_Gas_MCF"
+            ] = calendar.loc[
+                future_mask,
+                "Forecast_Gas_MCF"
+            ]
+        # -------------------------------------------------------------
+        # APPLY WI
+        # -------------------------------------------------------------
+        calendar[
+            "Net_Oil_BBL"
+        ] = (
+            calendar[
+                "Gross_Oil_BBL"
+            ]
+            *
+            wi
+        )
+        calendar[
+            "Net_Gas_MCF"
+        ] = (
+            calendar[
+                "Gross_Gas_MCF"
+            ]
+            *
+            wi
+        )
+        calendar[
+            "Facility"
+        ] = facility
+        calendar[
+            "Match_Name"
+        ] = well
+        pieces.append(
+            calendar[
+                [
+                    "Facility",
+                    "Match_Name",
+                    "Date",
+                    "Net_Oil_BBL",
+                    "Net_Gas_MCF"
+                ]
+            ]
+        )
+    if len(pieces) == 0:
+        return pd.DataFrame(
+            columns=[
+                "Facility",
+                "Match_Name",
+                "Date",
+                "Net_Oil_BBL",
+                "Net_Gas_MCF"
+            ]
+        )
+    return pd.concat(
+        pieces,
+        ignore_index=True
+    )
+# =====================================================================
+# BUILD HIGH + LOW PDP PROFILES
+# =====================================================================
+print()
+print(
+    "Building HIGH / ON PDP profile..."
+)
+pdp_high_wells = build_rtp_pdp_profiles(
+    "HIGH_ON"
+)
+print(
+    "Building LOW / OFF PDP profile..."
+)
+pdp_low_wells = build_rtp_pdp_profiles(
+    "LOW_OFF"
+)
+# =====================================================================
+# DIAGNOSTIC CHECK
+#
+# Confirms that HIGH Problematic DSUs begin with TC Forecast Month 1
+# and are not stitched to actual production.
+# =====================================================================
+print()
+print(
+    "Problematic DSU HIGH-case TC start check:"
+)
+for well in sorted(
+    PROBLEMATIC_PDP
+):
+    x = pdp_high_wells[
+        pdp_high_wells[
+            "Match_Name"
+        ]
+        ==
+        well
+    ].sort_values(
+        "Date"
+    )
+    if len(x) > 0:
+        print(
+            well,
+            "-> HIGH profile starts",
+            x.iloc[0]["Date"].strftime(
+                "%m/%d/%Y"
+            )
+        )
+# =====================================================================
+# AGGREGATE PDP BY FACILITY
+#
+# OIL:
+#   all Hercules components combined
+#
+# GAS:
+#   Hercules CPF/East/West retained separately
+# =====================================================================
+def aggregate_pdp_stream(
+    df,
+    stream
+):
+    d = df.copy()
+    if stream == "Oil":
+        d["Output_Facility"] = (
+            d["Facility"]
+            .apply(oil_facility_map)
+        )
+        value_col = (
+            "Net_Oil_BBL"
+        )
+    else:
+        d["Output_Facility"] = (
+            d["Facility"]
+            .apply(gas_facility_map)
+        )
+        value_col = (
+            "Net_Gas_MCF"
+        )
+    out = (
+        d.groupby(
+            [
+                "Output_Facility",
+                "Date"
+            ],
+            as_index=False
+        )[value_col]
+        .sum()
+    )
+    return out.rename(
+        columns={
+            "Output_Facility":
+                "Facility"
+        }
+    )
+pdp_high_oil = aggregate_pdp_stream(
+    pdp_high_wells,
+    "Oil"
+)
+pdp_high_gas = aggregate_pdp_stream(
+    pdp_high_wells,
+    "Gas"
+)
+pdp_low_oil = aggregate_pdp_stream(
+    pdp_low_wells,
+    "Oil"
+)
+pdp_low_gas = aggregate_pdp_stream(
+    pdp_low_wells,
+    "Gas"
+)
+# =====================================================================
+# CFD PROBLEMATIC-DSU HIGH / LOW PROFILES
+#
+# LOW/OFF = normal CFD profile from cfd_wells.
+# HIGH/ON = problematic CFD well's normal profile is completely removed
+#           and replaced by its well-specific 6COL type curve.
+#
+# TC Forecast Month 1 is anchored to the first month of the normal CFD
+# profile. Type-curve volumes are treated as GROSS; CFD routing WI is
+# applied exactly once here.
+# =====================================================================
+if "cfd_wells" not in globals():
+    raise ValueError(
+        "CFD sensitivity requires upstream well-level cfd_wells."
+    )
+
+cfd_base_wells_rtp = cfd_wells.copy()
+cfd_base_wells_rtp["Facility"] = cfd_base_wells_rtp["Facility"].apply(rtp_normalize_facility)
+cfd_base_wells_rtp["Match_Name"] = cfd_base_wells_rtp["Match_Name"].apply(normalize_name)
+cfd_base_wells_rtp["Date"] = (
+    pd.to_datetime(cfd_base_wells_rtp["Date"], errors="coerce")
+      .dt.to_period("M").dt.to_timestamp()
+)
+for col in ["Net_Oil_BBL", "Net_Gas_MCF"]:
+    cfd_base_wells_rtp[col] = pd.to_numeric(
+        cfd_base_wells_rtp[col], errors="coerce"
+    ).fillna(0.0)
+
+def build_rtp_cfd_profiles(scenario):
+    if scenario not in ["HIGH_ON", "LOW_OFF"]:
+        raise ValueError("scenario must be HIGH_ON or LOW_OFF")
+
+    out = cfd_base_wells_rtp.copy()
+    if scenario == "LOW_OFF":
+        return out
+
+    additions = []
+    for well in sorted(PROBLEMATIC_CFD):
+        normal = out[out["Match_Name"] == well].copy()
+        if len(normal) == 0:
+            raise ValueError(f"{well}: no normal CFD profile found in cfd_wells.")
+
+        route = cfd_route_rtp[cfd_route_rtp["Match_Name"] == well].copy()
+        if len(route) != 1:
+            raise ValueError(
+                f"{well}: expected exactly one CFD routing row; found {len(route)}."
+            )
+
+        facility = route.iloc[0]["Facility"]
+        wi = float(route.iloc[0]["WI"])
+        tc_start = normal["Date"].min()
+
+        tc = (
+            get_problematic_tc_profile(well, tc_start)
+            .sort_values("Date")
+            .head(MAX_WELL_MONTHS)
+            .copy()
+        )
+
+        additions.append(pd.DataFrame({
+            "Facility": facility,
+            "Match_Name": well,
+            "Date": tc["Date"].to_numpy(),
+            "Net_Oil_BBL": tc["TC_Oil_BBL"].to_numpy(dtype=float) * wi,
+            "Net_Gas_MCF": tc["TC_Gas_MCF"].to_numpy(dtype=float) * wi
+        }))
+
+        # HIGH must contain none of this well's normal CFD profile.
+        out = out[out["Match_Name"] != well].copy()
+
+    if additions:
+        out = pd.concat([out] + additions, ignore_index=True)
+    return out
+
+cfd_high_wells_rtp = build_rtp_cfd_profiles("HIGH_ON")
+cfd_low_wells_rtp = build_rtp_cfd_profiles("LOW_OFF")
+
+def aggregate_rtp_cfd_stream(df, stream):
+    d = df.copy()
+    if stream == "Oil":
+        d["Facility"] = d["Facility"].apply(oil_facility_map)
+        col = "Net_Oil_BBL"
+    else:
+        d["Facility"] = d["Facility"].apply(gas_facility_map)
+        col = "Net_Gas_MCF"
+    return d.groupby(["Facility", "Date"], as_index=False)[col].sum()
+
+cfd_high_oil_rtp = aggregate_rtp_cfd_stream(cfd_high_wells_rtp, "Oil")
+cfd_high_gas_rtp = aggregate_rtp_cfd_stream(cfd_high_wells_rtp, "Gas")
+cfd_low_oil_rtp = aggregate_rtp_cfd_stream(cfd_low_wells_rtp, "Oil")
+cfd_low_gas_rtp = aggregate_rtp_cfd_stream(cfd_low_wells_rtp, "Gas")
+
+print()
+print("CFD Problematic DSU replacement check:")
+for well in sorted(PROBLEMATIC_CFD):
+    lo = cfd_low_wells_rtp[cfd_low_wells_rtp["Match_Name"] == well]
+    hi = cfd_high_wells_rtp[cfd_high_wells_rtp["Match_Name"] == well]
+    print(
+        well,
+        "| LOW normal start:", lo["Date"].min() if len(lo) else "MISSING",
+        "| HIGH TC start:", hi["Date"].min() if len(hi) else "MISSING"
+    )
+
+# =====================================================================
+# REMAP EXISTING CFD / UFD FACILITY AGGREGATES
+#
+# Existing notebook variables expected:
+#
+#   cfd_fac
+#   ud_fac
+#
+# with:
+#
+#   Facility
+#   Date
+#   Net_Oil_BBL
+#   Net_Gas_MCF
+# =====================================================================
+def remap_component(
+    df,
+    stream
+):
+    d = df.copy()
+    d["Facility"] = (
+        d["Facility"]
+        .apply(rtp_normalize_facility)
+    )
+    if stream == "Oil":
+        d["Facility"] = (
+            d["Facility"]
+            .apply(oil_facility_map)
+        )
+        value_col = (
+            "Net_Oil_BBL"
+        )
+    else:
+        d["Facility"] = (
+            d["Facility"]
+            .apply(gas_facility_map)
+        )
+        value_col = (
+            "Net_Gas_MCF"
+        )
+    return (
+        d.groupby(
+            [
+                "Facility",
+                "Date"
+            ],
+            as_index=False
+        )[value_col]
+        .sum()
+    )
+# CFD is scenario-specific now; UFD remains unchanged.
+ufd_oil_rtp = remap_component(
+    ud_fac,
+    "Oil"
+)
+ufd_gas_rtp = remap_component(
+    ud_fac,
+    "Gas"
+)
+# =====================================================================
+# BUILD CASE 01 / 02 / 03
+# =====================================================================
+def build_rtp_case(
+    pdp_df,
+    cfd_df,
+    stream,
+    case_number
+):
+    if stream == "Oil":
+        pdp_col = (
+            "Net_Oil_BBL"
+        )
+        component_col = (
+            "Net_Oil_BBL"
+        )
+        ufd_df = (
+            ufd_oil_rtp
+        )
+    else:
+        pdp_col = (
+            "Net_Gas_MCF"
+        )
+        component_col = (
+            "Net_Gas_MCF"
+        )
+        ufd_df = (
+            ufd_gas_rtp
+        )
+    # -----------------------------------------------------------------
+    # PDP
+    # -----------------------------------------------------------------
+    pdp_part = pdp_df[
+        [
+            "Facility",
+            "Date",
+            pdp_col
+        ]
+    ].rename(
+        columns={
+            pdp_col:
+                "PDP_Volume"
+        }
+    )
+    frames = [
+        pdp_part
+    ]
+    # -----------------------------------------------------------------
+    # CFD
+    # -----------------------------------------------------------------
+    if case_number >= 2:
+        cfd_part = cfd_df[
+            [
+                "Facility",
+                "Date",
+                component_col
+            ]
+        ].rename(
+            columns={
+                component_col:
+                    "CFD_Volume"
+            }
+        )
+        frames.append(
+            cfd_part
+        )
+    # -----------------------------------------------------------------
+    # UFD
+    # -----------------------------------------------------------------
+    if case_number >= 3:
+        ufd_part = ufd_df[
+            [
+                "Facility",
+                "Date",
+                component_col
+            ]
+        ].rename(
+            columns={
+                component_col:
+                    "UFD_Volume"
+            }
+        )
+        frames.append(
+            ufd_part
+        )
+    # -----------------------------------------------------------------
+    # FULL FACILITY / DATE KEY
+    # -----------------------------------------------------------------
+    keys = (
+        pd.concat(
+            [
+                x[
+                    [
+                        "Facility",
+                        "Date"
+                    ]
+                ]
+                for x in frames
+            ],
+            ignore_index=True
+        )
+        .drop_duplicates()
+    )
+    out = keys.merge(
+        pdp_part,
+        on=[
+            "Facility",
+            "Date"
+        ],
+        how="left"
+    )
+    if case_number >= 2:
+        out = out.merge(
+            cfd_part,
+            on=[
+                "Facility",
+                "Date"
+            ],
+            how="left"
+        )
+    else:
+        out[
+            "CFD_Volume"
+        ] = 0.0
+    if case_number >= 3:
+        out = out.merge(
+            ufd_part,
+            on=[
+                "Facility",
+                "Date"
+            ],
+            how="left"
+        )
+    else:
+        out[
+            "UFD_Volume"
+        ] = 0.0
+    for col in [
+        "PDP_Volume",
+        "CFD_Volume",
+        "UFD_Volume"
+    ]:
+        out[col] = (
+            pd.to_numeric(
+                out[col],
+                errors="coerce"
+            )
+            .fillna(0.0)
+        )
+    out[
+        "Total_Volume"
+    ] = (
+        out[
+            "PDP_Volume"
+        ]
+        +
+        out[
+            "CFD_Volume"
+        ]
+        +
+        out[
+            "UFD_Volume"
+        ]
+    )
+    out["Date"] = pd.to_datetime(
+        out["Date"]
+    )
+    out[
+        "Days_In_Month"
+    ] = (
+        out[
+            "Date"
+        ].dt.days_in_month
+    )
+    out[
+        "Rate"
+    ] = (
+        out[
+            "Total_Volume"
+        ]
+        /
+        out[
+            "Days_In_Month"
+        ]
+    )
+    out = (
+        out.sort_values(
+            [
+                "Facility",
+                "Date"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+    out[
+        "Cumulative"
+    ] = (
+        out.groupby(
+            "Facility"
+        )[
+            "Total_Volume"
+        ]
+        .cumsum()
+    )
+    return out
+# =====================================================================
+# CREATE ALL HIGH / LOW CASES
+# =====================================================================
+cases = {}
+for scenario, oil_pdp, gas_pdp, oil_cfd, gas_cfd in [
+    ("HIGH_ON", pdp_high_oil, pdp_high_gas,
+     cfd_high_oil_rtp, cfd_high_gas_rtp),
+    ("LOW_OFF", pdp_low_oil, pdp_low_gas,
+     cfd_low_oil_rtp, cfd_low_gas_rtp)
+]:
+    for case_number in [1, 2, 3]:
+        cases[(scenario, case_number, "Oil")] = build_rtp_case(
+            oil_pdp, oil_cfd, "Oil", case_number
+        )
+        cases[(scenario, case_number, "Gas")] = build_rtp_case(
+            gas_pdp, gas_cfd, "Gas", case_number
+        )
+
+# =====================================================================
+# AUGUST 2026 CASE-03 DIAGNOSTIC
+# Shows whether unexpected zeros already exist in the built cases.
+# =====================================================================
+print()
+print("============================================================")
+print("AUGUST 2026 CASE-03 CURRENT-RATE DIAGNOSTIC")
+print("============================================================")
+for scenario in ["HIGH_ON", "LOW_OFF"]:
+    for stream in ["Oil", "Gas"]:
+        x = cases[(scenario, 3, stream)].copy()
+        x["Date"] = (
+            pd.to_datetime(x["Date"], errors="coerce")
+              .dt.to_period("M").dt.to_timestamp()
+        )
+        aug = x[
+            (x["Date"].dt.year == FORECAST_CURRENT_DATE.year)
+            &
+            (x["Date"].dt.month == FORECAST_CURRENT_DATE.month)
+        ].copy()
+
+        all_facilities = set(x["Facility"].dropna().astype(str))
+        aug_facilities = set(aug["Facility"].dropna().astype(str))
+        missing_aug = sorted(all_facilities - aug_facilities)
+
+        print()
+        print(scenario, "|", stream)
+        print("  Case-03 facilities:", len(all_facilities))
+        print("  Facilities with Aug-2026 row:", len(aug_facilities))
+        print("  Facilities missing Aug-2026 row:", len(missing_aug))
+        if missing_aug:
+            print("  Missing:", missing_aug)
+
+        zero_aug = aug[
+            pd.to_numeric(aug["Total_Volume"], errors="coerce").fillna(0.0) == 0.0
+        ]
+        print("  Facilities with Aug-2026 TOTAL VOLUME = 0:", len(zero_aug))
+        if len(zero_aug) > 0:
+            display(
+                zero_aug[
+                    ["Facility", "Date", "PDP_Volume", "CFD_Volume",
+                     "UFD_Volume", "Total_Volume", "Rate"]
+                ].sort_values("Facility")
+            )
+
+# =====================================================================
+# OUTPUT NAMES
+# =====================================================================
+CASE_NAMES = {
+    1:
+        "PDP_Base",
+    2:
+        "PDP_Plus_Confirmed",
+    3:
+        "PDP_Plus_Confirmed_Plus_Uncertain"
+}
+# =====================================================================
+# EXPORT ALL FACILITY-MONTH CSVs
+# =====================================================================
+def export_rtp_case(
+    df,
+    scenario,
+    case_number,
+    stream
+):
+    d = df.copy()
+    if stream == "Oil":
+        d = d.rename(
+            columns={
+                "PDP_Volume":
+                    "PDP_Oil_BBL",
+                "CFD_Volume":
+                    "Confirmed_Oil_BBL",
+                "UFD_Volume":
+                    "Uncertain_Oil_BBL",
+                "Total_Volume":
+                    "Total_Oil_BBL",
+                "Rate":
+                    "Total_Oil_BPD",
+                "Cumulative":
+                    "Total_Oil_Cumulative_BBL"
+            }
+        )
+    else:
+        d = d.rename(
+            columns={
+                "PDP_Volume":
+                    "PDP_Gas_MCF",
+                "CFD_Volume":
+                    "Confirmed_Gas_MCF",
+                "UFD_Volume":
+                    "Uncertain_Gas_MCF",
+                "Total_Volume":
+                    "Total_Gas_MCF",
+                "Rate":
+                    "Total_Gas_MCFD",
+                "Cumulative":
+                    "Total_Gas_Cumulative_MCF"
+            }
+        )
+    filename = (
+        f"RTP_{scenario}_"
+        f"{case_number:02d}_"
+        f"{CASE_NAMES[case_number]}_"
+        f"{stream}.csv"
+    )
+    d.to_csv(
+        filename,
+        index=False
+    )
+    print(
+        "Saved:",
+        filename
+    )
+for scenario in [
+    "HIGH_ON",
+    "LOW_OFF"
+]:
+    for case_number in [
+        1,
+        2,
+        3
+    ]:
+        for stream in [
+            "Oil",
+            "Gas"
+        ]:
+            export_rtp_case(
+                cases[
+                    (
+                        scenario,
+                        case_number,
+                        stream
+                    )
+                ],
+                scenario,
+                case_number,
+                stream
+            )
+# =====================================================================
+# RECORDED JULY PDP ACTUAL RATE
+#
+# IMPORTANT:
+#
+# This intentionally uses ORIGINAL RECORDED PRODUCTION.
+#
+# It does NOT use the Problematic DSU replacement type curve.
+#
+# Therefore this metric answers:
+#
+# "What was actually recorded for PDPs on the latest production month?"
+#
+# rather than:
+#
+# "What does the HIGH modeled profile say?"
+# =====================================================================
+def build_recorded_actual_table(
+    stream
+):
+    d = pdp_actual_rtp[
+        pdp_actual_rtp[
+            "Date"
+        ]
+        ==
+        RECORDED_PRODUCTION_DATE
+    ].copy()
+    route = pdp_route_rtp[
+        [
+            "Facility",
+            "Match_Name",
+            "WI"
+        ]
+    ].copy()
+    d = d.merge(
+        route,
+        on="Match_Name",
+        how="inner"
+    )
+    if stream == "Oil":
+        d[
+            "Facility"
+        ] = (
+            d["Facility"]
+            .apply(oil_facility_map)
+        )
+        d[
+            "Net_Volume"
+        ] = (
+            d[
+                "Oil_BBL"
+            ]
+            *
+            d[
+                "WI"
+            ]
+        )
+    else:
+        d[
+            "Facility"
+        ] = (
+            d["Facility"]
+            .apply(gas_facility_map)
+        )
+        d[
+            "Net_Volume"
+        ] = (
+            d[
+                "Gas_MCF"
+            ]
+            *
+            d[
+                "WI"
+            ]
+        )
+    out = (
+        d.groupby(
+            "Facility",
+            as_index=False
+        )[
+            "Net_Volume"
+        ]
+        .sum()
+    )
+    out[
+        "Recorded_PDP_Rate_7_15_2026"
+    ] = (
+        out[
+            "Net_Volume"
+        ]
+        /
+        RECORDED_PRODUCTION_DATE.days_in_month
+    )
+    return out[
+        [
+            "Facility",
+            "Recorded_PDP_Rate_7_15_2026"
+        ]
+    ]
+recorded_oil = (
+    build_recorded_actual_table(
+        "Oil"
+    )
+)
+recorded_oil[
+    "Stream"
+] = "Oil"
+recorded_gas = (
+    build_recorded_actual_table(
+        "Gas"
+    )
+)
+recorded_gas[
+    "Stream"
+] = "Gas"
+recorded_all = pd.concat(
+    [
+        recorded_oil,
+        recorded_gas
+    ],
+    ignore_index=True
+)
+# =====================================================================
+# SUMMARY METRICS
+# =====================================================================
+def summarize_rtp_case(
+    df,
+    scenario,
+    case_number,
+    stream
+):
+    rows = []
+    for facility, d in df.groupby(
+        "Facility"
+    ):
+        d = (
+            d.sort_values(
+                "Date"
+            )
+            .copy()
+        )
+        # -------------------------------------------------------------
+        # FORECAST-DEPENDENT CURRENT RATE
+        # -------------------------------------------------------------
+        # Match reporting MONTH rather than requiring an exact timestamp.
+        d["Date"] = (
+            pd.to_datetime(d["Date"], errors="coerce")
+              .dt.to_period("M")
+              .dt.to_timestamp()
+        )
+        current = d[
+            (d["Date"].dt.year == FORECAST_CURRENT_DATE.year)
+            &
+            (d["Date"].dt.month == FORECAST_CURRENT_DATE.month)
+        ].copy()
+        if len(current) > 0:
+            current_rate = float(current["Rate"].sum())
+        else:
+            # Missing month is not the same thing as zero production.
+            current_rate = np.nan
+        # -------------------------------------------------------------
+        # RATE ON 2/1/2034
+        # -------------------------------------------------------------
+        target = d[
+            d["Date"]
+            ==
+            TARGET_2034_DATE
+        ]
+        if len(target) > 0:
+            rate_2034 = float(
+                target.iloc[0][
+                    "Rate"
+                ]
+            )
+        else:
+            rate_2034 = np.nan
+        # -------------------------------------------------------------
+        # PEAK ON / AFTER 2/1/2034
+        # -------------------------------------------------------------
+        post = d[
+            d["Date"]
+            >=
+            TARGET_2034_DATE
+        ].copy()
+        if len(post) > 0:
+            peak_index = (
+                post[
+                    "Rate"
+                ].idxmax()
+            )
+            peak_rate = float(
+                post.loc[
+                    peak_index,
+                    "Rate"
+                ]
+            )
+            peak_date = (
+                post.loc[
+                    peak_index,
+                    "Date"
+                ]
+            )
+        else:
+            peak_rate = np.nan
+            peak_date = pd.NaT
+        # -------------------------------------------------------------
+        # ENDING CUMULATIVE
+        # -------------------------------------------------------------
+        if len(d) > 0:
+            end_date = (
+                d.iloc[-1][
+                    "Date"
+                ]
+            )
+            end_cumulative = float(
+                d.iloc[-1][
+                    "Cumulative"
+                ]
+            )
+        else:
+            end_date = pd.NaT
+            end_cumulative = np.nan
+        rows.append(
+            {
+                "Facility":
+                    facility,
+                "Stream":
+                    stream,
+                "Case_Number":
+                    case_number,
+                "Case":
+                    CASE_NAMES[
+                        case_number
+                    ],
+                "RTP_Scenario":
+                    (
+                        "HIGH / ON"
+                        if scenario
+                        ==
+                        "HIGH_ON"
+                        else
+                        "LOW / OFF"
+                    ),
+                "Forecast_Dependent_Current_Date":
+                    FORECAST_CURRENT_DATE,
+                "Forecast_Dependent_Current_Rate":
+                    current_rate,
+                "Rate_2_1_2034":
+                    rate_2034,
+                "Post_2_1_2034_Peak_Rate":
+                    peak_rate,
+                "Post_2_1_2034_Peak_Date":
+                    peak_date,
+                "End_Date":
+                    end_date,
+                "End_Cumulative":
+                    end_cumulative
+            }
+        )
+    return pd.DataFrame(
+        rows
+    )
+summary_parts = []
+for scenario in [
+    "HIGH_ON",
+    "LOW_OFF"
+]:
+    for case_number in [
+        1,
+        2,
+        3
+    ]:
+        for stream in [
+            "Oil",
+            "Gas"
+        ]:
+            summary_parts.append(
+                summarize_rtp_case(
+                    cases[
+                        (
+                            scenario,
+                            case_number,
+                            stream
+                        )
+                    ],
+                    scenario,
+                    case_number,
+                    stream
+                )
+            )
+summary_long = pd.concat(
+    summary_parts,
+    ignore_index=True
+)
+# =====================================================================
+# ADD RECORDED JULY ACTUAL REFERENCE
+# =====================================================================
+summary_long = summary_long.merge(
+    recorded_all,
+    on=[
+        "Facility",
+        "Stream"
+    ],
+    how="left"
+)
+summary_long[
+    "Recorded_PDP_Production_Date"
+] = RECORDED_PRODUCTION_DATE
+# =====================================================================
+# HIGH / LOW SIDE-BY-SIDE
+# =====================================================================
+key_cols = [
+    "Facility",
+    "Stream",
+    "Case_Number",
+    "Case"
+]
+high = summary_long[
+    summary_long[
+        "RTP_Scenario"
+    ]
+    ==
+    "HIGH / ON"
+].copy()
+low = summary_long[
+    summary_long[
+        "RTP_Scenario"
+    ]
+    ==
+    "LOW / OFF"
+].copy()
+high = high[
+    key_cols
+    +
+    [
+        "Forecast_Dependent_Current_Date",
+        "Recorded_PDP_Production_Date",
+        "Recorded_PDP_Rate_7_15_2026",
+        "Forecast_Dependent_Current_Rate",
+        "Rate_2_1_2034",
+        "Post_2_1_2034_Peak_Rate",
+        "Post_2_1_2034_Peak_Date",
+        "End_Date",
+        "End_Cumulative"
+    ]
+]
+high = high.rename(
+    columns={
+        "Forecast_Dependent_Current_Rate":
+            "HIGH_ON_Current_Rate",
+        "Rate_2_1_2034":
+            "HIGH_ON_Rate_2_1_2034",
+        "Post_2_1_2034_Peak_Rate":
+            "HIGH_ON_Post2034_Peak_Rate",
+        "Post_2_1_2034_Peak_Date":
+            "HIGH_ON_Post2034_Peak_Date",
+        "End_Date":
+            "HIGH_ON_End_Date",
+        "End_Cumulative":
+            "HIGH_ON_End_Cumulative"
+    }
+)
+low = low[
+    key_cols
+    +
+    [
+        "Forecast_Dependent_Current_Rate",
+        "Rate_2_1_2034",
+        "Post_2_1_2034_Peak_Rate",
+        "Post_2_1_2034_Peak_Date",
+        "End_Date",
+        "End_Cumulative"
+    ]
+]
+low = low.rename(
+    columns={
+        "Forecast_Dependent_Current_Rate":
+            "LOW_OFF_Current_Rate",
+        "Rate_2_1_2034":
+            "LOW_OFF_Rate_2_1_2034",
+        "Post_2_1_2034_Peak_Rate":
+            "LOW_OFF_Post2034_Peak_Rate",
+        "Post_2_1_2034_Peak_Date":
+            "LOW_OFF_Post2034_Peak_Date",
+        "End_Date":
+            "LOW_OFF_End_Date",
+        "End_Cumulative":
+            "LOW_OFF_End_Cumulative"
+    }
+)
+summary = high.merge(
+    low,
+    on=key_cols,
+    how="outer"
+)
+# =====================================================================
+# HIGH MINUS LOW DELTAS
+#
+# Positive = HIGH / ON adds rate or cumulative.
+# =====================================================================
+summary[
+    "Delta_Current_Rate_HIGH_minus_LOW"
+] = (
+    summary[
+        "HIGH_ON_Current_Rate"
+    ]
+    -
+    summary[
+        "LOW_OFF_Current_Rate"
+    ]
+)
+summary[
+    "Delta_Rate_2_1_2034_HIGH_minus_LOW"
+] = (
+    summary[
+        "HIGH_ON_Rate_2_1_2034"
+    ]
+    -
+    summary[
+        "LOW_OFF_Rate_2_1_2034"
+    ]
+)
+summary[
+    "Delta_Post2034_Peak_Rate_HIGH_minus_LOW"
+] = (
+    summary[
+        "HIGH_ON_Post2034_Peak_Rate"
+    ]
+    -
+    summary[
+        "LOW_OFF_Post2034_Peak_Rate"
+    ]
+)
+summary[
+    "Delta_End_Cumulative_HIGH_minus_LOW"
+] = (
+    summary[
+        "HIGH_ON_End_Cumulative"
+    ]
+    -
+    summary[
+        "LOW_OFF_End_Cumulative"
+    ]
+)
+# =====================================================================
+# CASE 03 RANKINGS
+#
+# Oil and Gas independently.
+# Rank 1 = highest.
+# =====================================================================
+aggressive = summary[
+    summary[
+        "Case_Number"
+    ]
+    ==
+    3
+].copy()
+for scenario_prefix in [
+    "HIGH_ON",
+    "LOW_OFF"
+]:
+    aggressive[
+        f"{scenario_prefix}_Current_Rank"
+    ] = (
+        aggressive.groupby(
+            "Stream"
+        )[
+            f"{scenario_prefix}_Current_Rate"
+        ]
+        .rank(
+            method="min",
+            ascending=False
+        )
+        .astype(
+            "Int64"
+        )
+    )
+    aggressive[
+        f"{scenario_prefix}_2_1_2034_Rank"
+    ] = (
+        aggressive.groupby(
+            "Stream"
+        )[
+            f"{scenario_prefix}_Rate_2_1_2034"
+        ]
+        .rank(
+            method="min",
+            ascending=False
+        )
+        .astype(
+            "Int64"
+        )
+    )
+    aggressive[
+        f"{scenario_prefix}_Post2034_Peak_Rank"
+    ] = (
+        aggressive.groupby(
+            "Stream"
+        )[
+            f"{scenario_prefix}_Post2034_Peak_Rate"
+        ]
+        .rank(
+            method="min",
+            ascending=False
+        )
+        .astype(
+            "Int64"
+        )
+    )
+rank_cols = [
+    "Facility",
+    "Stream",
+    "HIGH_ON_Current_Rank",
+    "LOW_OFF_Current_Rank",
+    "HIGH_ON_2_1_2034_Rank",
+    "LOW_OFF_2_1_2034_Rank",
+    "HIGH_ON_Post2034_Peak_Rank",
+    "LOW_OFF_Post2034_Peak_Rank"
+]
+summary = summary.merge(
+    aggressive[
+        rank_cols
+    ],
+    on=[
+        "Facility",
+        "Stream"
+    ],
+    how="left"
+)
+# =====================================================================
+# UNITS
+# =====================================================================
+summary[
+    "Rate_Unit"
+] = np.where(
+    summary[
+        "Stream"
+    ]
+    ==
+    "Oil",
+    "BPD",
+    "MCF/D"
+)
+summary[
+    "Cumulative_Unit"
+] = np.where(
+    summary[
+        "Stream"
+    ]
+    ==
+    "Oil",
+    "BBL",
+    "MCF"
+)
+# =====================================================================
+# FINAL COLUMN ORDER
+# =====================================================================
+summary = summary[
+    [
+        "Facility",
+        "Stream",
+        "Rate_Unit",
+        "Cumulative_Unit",
+        "Case_Number",
+        "Case",
+        # -------------------------------------------------------------
+        # RECORDED ACTUAL REFERENCE
+        # -------------------------------------------------------------
+        "Recorded_PDP_Production_Date",
+        "Recorded_PDP_Rate_7_15_2026",
+        # -------------------------------------------------------------
+        # FORECAST-DEPENDENT CURRENT
+        # -------------------------------------------------------------
+        "Forecast_Dependent_Current_Date",
+        "HIGH_ON_Current_Rate",
+        "LOW_OFF_Current_Rate",
+        "Delta_Current_Rate_HIGH_minus_LOW",
+        "HIGH_ON_Current_Rank",
+        "LOW_OFF_Current_Rank",
+        # -------------------------------------------------------------
+        # 2/1/2034
+        # -------------------------------------------------------------
+        "HIGH_ON_Rate_2_1_2034",
+        "LOW_OFF_Rate_2_1_2034",
+        "Delta_Rate_2_1_2034_HIGH_minus_LOW",
+        "HIGH_ON_2_1_2034_Rank",
+        "LOW_OFF_2_1_2034_Rank",
+        # -------------------------------------------------------------
+        # POST-2034 PEAK
+        # -------------------------------------------------------------
+        "HIGH_ON_Post2034_Peak_Rate",
+        "HIGH_ON_Post2034_Peak_Date",
+        "LOW_OFF_Post2034_Peak_Rate",
+        "LOW_OFF_Post2034_Peak_Date",
+        "Delta_Post2034_Peak_Rate_HIGH_minus_LOW",
+        "HIGH_ON_Post2034_Peak_Rank",
+        "LOW_OFF_Post2034_Peak_Rank",
+        # -------------------------------------------------------------
+        # CUMULATIVE
+        # -------------------------------------------------------------
+        "HIGH_ON_End_Date",
+        "HIGH_ON_End_Cumulative",
+        "LOW_OFF_End_Date",
+        "LOW_OFF_End_Cumulative",
+        "Delta_End_Cumulative_HIGH_minus_LOW"
+    ]
+]
+summary = (
+    summary.sort_values(
+        [
+            "Stream",
+            "Facility",
+            "Case_Number"
+        ]
+    )
+    .reset_index(
+        drop=True
+    )
+)
+# =====================================================================
+# SAVE MASTER SUMMARY
+# =====================================================================
+summary.to_csv(
+    SUMMARY_FILE,
+    index=False
+)
+# =====================================================================
+# FINISH
+# =====================================================================
+print()
+print(
+    "============================================================"
+)
+print(
+    "PDP + CFD RETURN-TO-PRODUCTION (RTP) SENSITIVITY COMPLETE"
+)
+print(
+    "============================================================"
+)
+print()
+print(
+    "HIGH / ON:"
+)
+print(
+    "  Normal PDPs = actual + massive PDP forecast"
+)
+print(
+    "  Sensitivity Wells = actual + massive PDP forecast"
+)
+print(
+    "  Problematic DSUs = TYPE CURVE ONLY"
+)
+print(
+    "                     Original production completely removed"
+)
+print(
+    "                     Original PDP forecast completely removed"
+)
+print()
+print(
+    "LOW / OFF:"
+)
+print(
+    "  Normal PDPs = actual + massive PDP forecast"
+)
+print(
+    "  Sensitivity Wells = actual then ZERO"
+)
+print(
+    "  Problematic DSUs = actual + massive PDP forecast"
+)
+print()
+print(
+    "Problematic DSU HIGH-case TC alignment:"
+)
+print(
+    "  Forecast Month 1 = original first production month"
+)
+print(
+    "  (first PDP forecast month only if no actual production exists)"
+)
+print()
+print(
+    "Forecast-dependent current date:",
+    FORECAST_CURRENT_DATE.strftime(
+        "%m/%d/%Y"
+    )
+)
+print(
+    "Recorded PDP actual reference date:",
+    RECORDED_PRODUCTION_DATE.strftime(
+        "%m/%d/%Y"
+    )
+)
+print()
+print(
+    "IMPORTANT:"
+)
+print(
+    "  Recorded_PDP_Rate_7_15_2026 is always the REAL recorded"
+)
+print(
+    "  production value, even though Problematic DSU production"
+)
+print(
+    "  is replaced by the TC in the HIGH modeled case."
+)
+print()
+print(
+    "Hercules Oil:"
+)
+print(
+    "  CPF + East Satellite + West Satellite combined as HERCULES"
+)
+print()
+print(
+    "Hercules Gas:"
+)
+print(
+    "  CPF / East Satellite / West Satellite remain separate"
+)
+print()
+print(
+    "Delta convention = HIGH / ON - LOW / OFF"
+)
+print()
+print(
+    "Saved:",
+    SUMMARY_FILE
+)
+print()
+display(
+    summary
+)
